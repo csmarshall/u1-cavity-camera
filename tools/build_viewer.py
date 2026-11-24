@@ -82,6 +82,19 @@ def main() -> None:
                 if k in m["files"]:
                     entry[k] = b64(os.path.join(args.stl_dir, m["files"][k]))
             mounts[key] = entry
+    # The portrait-below test kit replaces the hinge configs when present (cad/u1_wedge_kit.py --viewer)
+    files_js = "const FILES={};"
+    kit_json = os.path.join(args.stl_dir, "viewer_kit.json")
+    if os.path.exists(kit_json):
+        with open(kit_json) as f:
+            kit = json.load(f)
+        mounts = kit["configs"]
+        files_js = "const FILES=%s;" % json.dumps({fn: b64(os.path.join(args.stl_dir, fn)) for fn in kit["files"]},
+                                                  separators=(",", ":"))
+        log.info("Using the test kit: %d configs, %d shared meshes", len(mounts), len(kit["files"]))
+    html, n = re.subn(r"const FILES=\{.*?\};", lambda _: files_js, html, count=1, flags=re.S)
+    if n != 1:
+        raise SystemExit("FILES block not found in viewer; refusing to write")
     mounts_js = "const MOUNTS=%s;" % json.dumps(mounts, separators=(",", ":"))
     html, n = re.subn(r"const MOUNTS=\{.*?\};", lambda _: mounts_js, html, count=1, flags=re.S)
     if n != 1:

@@ -240,30 +240,8 @@ def views(p: case.Params) -> Dict[str, Callable[[str], None]]:
     knuckle_xb = -sum(gb.knuckle_spans()["cradle"][1]) / 2
     wedge_print = mount.print_orient_plate(mount.build_wedge_mount(g, 45.0)).val()
     return {
-        "mount_iso_45": lambda out: render_iso(
-            mount_layers(45.0), "Front mount at 45 deg down: wall plate (wall at Y=0), cradle, case", out,
-            elev=20, azim=-50),
-        "mount_section_0": lambda out: render_section(
-            mount_layers(0.0), "x", knuckle_x, "Front mount, tilt 0: hinge through a cradle knuckle (wall at Y=0)", out),
-        "mount_section_45": lambda out: render_section(
-            mount_layers(45.0), "x", knuckle_x, "Front mount, tilt 45 deg down (wall at Y=0)", out),
-        "mount_section_75": lambda out: render_section(
-            mount_layers(75.0), "x", knuckle_x, "Front mount, tilt 75 deg (end of checked range)", out),
-        "mount_below_iso_45": lambda out: render_iso(
-            below_layers(45.0), "Below mode at 45 deg down: plate on the feature, end hinge, camera hanging under it",
-            out, elev=15, azim=125),
-        "mount_below_section_0": lambda out: render_section(
-            below_layers(0.0), "x", knuckle_xb, "Below mode, tilt 0 (wall at Y=0, plate Z 0..22)", out),
-        "mount_below_section_45": lambda out: render_section(
-            below_layers(45.0), "x", knuckle_xb, "Below mode, tilt 45 deg down", out),
-        "mount_below_section_75": lambda out: render_section(
-            below_layers(75.0), "x", knuckle_xb, "Below mode, tilt 75 deg (end of checked range)", out),
-        "mount_print_layout": lambda out: render_iso(
-            [Layer("mount", mount.print_orient_plate(mount.build_plate(g)).val()),
-             Layer("cradle", mount.print_orient_cradle(g, cradle_c).translate((0, 30, 0)).val()),
-             Layer("base", cq.Workplane().add(wedge_print).translate((0, 75, 0)).val())],
-            "As printed, no supports: wall plate (back down), cradle (floor down), 45 deg wedge (back down)", out,
-            elev=35, azim=-60),
+        # Hinge and landscape mount views were retired (dead end); the portrait-below
+        # test kit is shown live in the viewer. Old renders: docs/renders/archive/.
         "base_iso": lambda out: render_iso([Layer("base", base)], "Base, as printed (upright)", out),
         "lid_iso": lambda out: render_iso([Layer("lid", lid)], "Lid, assembled orientation (hooks down)",
                                           out, elev=-25),
