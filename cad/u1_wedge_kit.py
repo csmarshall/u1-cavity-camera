@@ -48,9 +48,15 @@ log = logging.getLogger("u1_wedge_kit")
 @dataclass
 class KitParams:
     angles: Tuple[float, ...] = (30.0, 45.0, 60.0, 75.0)
-    below_slope_deg: float = 30.0    # ASSUMED (MEASURE): outer shell below the lip, outward from vertical
-                                     # (Charles: shell ~45-60 deg; 30 from vertical = 60 from horizontal, conservative)
-    below_gap: float = 20.0          # ASSUMED (MEASURE): open gap behind the lip plane under its bottom edge (~20-30 mm)
+    # Measured by Charles 2026-11-24, each rounded DOWN (toward less space):
+    lip_h: float = 25.0              # A: flat height of the lip
+    below_gap: float = 15.0          # B: open gap behind the lip plane, under its bottom edge
+    below_slope_deg: float = 45.0    # C: outer shell, outward from vertical
+    toolhead_dz: float = 45.0        # D: lip bottom edge down to the toolhead top, toolhead at front-most travel
+    toolhead_dy: float = 10.0        # E: lip inner face to the toolhead front, same position
+    rib_spacing: float = 57.0        # F: rib spacing on the lip's inner face; the plate fits between two ribs
+    toolhead_margin: float = 2.0     # extra keep-out around the toolhead
+    rib_clear: float = 1.0           # plate clearance to each rib
     # Dovetail rail on the plate (profile in YZ, running along X)
     rail_base_w: float = 8.0         # width at the plate face (Z)
     rail_h: float = 3.0              # height off the plate face (Y)
@@ -103,6 +109,13 @@ class Kit:
                                  tilt_max=0.0, tilt_step=5.0)
         self.g = fm.Geometry(self.cp, self.mp)
         self.g.cradle_x0, self.g.cradle_x1 = -(half - self.mp.end_margin), half - self.mp.end_margin
+        # The kit plate has no hinge arms: it sits between two ribs on the lip
+        hp = kp.rib_spacing / 2 - kp.rib_clear
+        self.g.plate_x0, self.g.plate_x1 = -hp, hp
+        inset = self.mp.screw_inset
+        self.g.screw_xs = lambda: (-hp + inset, hp - inset)
+        if self.mp.plate_h > kp.lip_h:
+            raise ValueError(f"plate_h {self.mp.plate_h} is taller than the lip ({kp.lip_h})")
         self.rail_c = self.mp.plate_h / 2
         self.rail_top_w = kp.rail_base_w + 2 * kp.rail_h / math.tan(math.radians(kp.rail_flank_deg))
         self.key_xs = (self.g.cradle_x0 + kp.key_inset, self.g.cradle_x1 - kp.key_inset)
@@ -167,22 +180,39 @@ class Kit:
             parts += [env, env.rotate((0, 0, 0), (0, 0, 1), 180)]
         return parts
 
+    def toolhead(self) -> cq.Workplane:
+        """Toolhead keep-out (world): at front-most travel it reaches toolhead_dy from the lip face, toolhead_dz below the lip."""
+        kp = self.kp
+        return _box(-500, 500, kp.toolhead_dy - kp.toolhead_margin, 500, -500, -kp.toolhead_dz + kp.toolhead_margin)
+
     def place(self, angle: float, parts: List[cq.Workplane]) -> float:
         """Smallest hinge-reference distance from the wall that clears plate, rail and cover at `angle`."""
         kp, g = self.kp, self.g
         obstacles = (_box(-500, 500, -1, self.mp.plate_t + kp.rail_h + kp.lip_gap, 0, self.mp.plate_h)
                      .union(g.cover()))
         world = lambda w: g.to_world(w)  # noqa: E731
-        cover_w = world(obstacles)
+        cover_w = world(obstacles).union(self.toolhead())
 
         def clear(ay: float) -> bool:
             g.axis_Y = ay
             return all(_vol(world(g.pose(p, angle)).intersect(cover_w)) < 1e-3 for p in parts)
 
-        lo, hi = self.mp.plate_t + kp.rail_h + kp.lip_gap, 150.0
-        if not clear(hi):
-            raise RuntimeError(f"{angle:.0f} deg: no clear position within 150 mm of the lip")
-        for _ in range(9):
+        lo = self.mp.plate_t + kp.rail_h + kp.lip_gap
+        # Moving out from the lip first frees the cover, then (further out) runs into the
+        # toolhead, so step outward to the first clear position, then bisect back toward the lip
+        hi = None
+        for i in range(41):
+            ay = lo + i * 2.0
+            if clear(ay):
+                hi = ay
+                break
+        if hi is None:
+            raise RuntimeError(f"{angle:.0f} deg: no position clears both the cover and the toolhead")
+        if hi == lo:
+            g.axis_Y = lo
+            return lo
+        lo = hi - 2.0
+        for _ in range(6):
             mid = (lo + hi) / 2
             lo, hi = (lo, mid) if clear(mid) else (mid, hi)
         g.axis_Y = hi
@@ -295,6 +325,12 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
         want = (0.0, math.cos(math.radians(a)), -math.sin(math.radians(a)))
         if max(abs(x - y) for x, y in zip(d, want)) > 1e-6:
             raise RuntimeError(f"{a:.0f} deg: lens points {d}, expected {want}")
+        th = kit.toolhead()
+        for part in [kit.build_cradle()] + kit.moving_parts()[1:]:
+            if _vol(g.to_world(g.pose(part, a)).intersect(th)) > 1e-3:
+                raise RuntimeError(f"{a:.0f} deg: the camera or cradle reaches the toolhead keep-out")
+        if _vol(wedge.intersect(th)) > 1e-3:
+            raise RuntimeError(f"{a:.0f} deg wedge reaches the toolhead keep-out")
         if _vol(wedge.intersect(cover_w)) > 1e-3 or _vol(wedge.intersect(plate_body)) > 1e-3:
             raise RuntimeError(f"{a:.0f} deg wedge runs into the cover or plate")
         if _vol(wedge.intersect(plate)) > 1e-3:
@@ -348,10 +384,18 @@ def main() -> None:
     plate, cradle = kit.build_plate(), kit.build_cradle()
     parts = kit.moving_parts()
     wedges, placements = {}, {}
+    skipped = []
     for a in kp.angles:
-        placements[a] = kit.place(a, parts)
+        try:
+            placements[a] = kit.place(a, parts)
+        except RuntimeError as e:
+            log.warning("Skipping %.0f deg: %s", a, e)
+            skipped.append(a)
+            continue
         wedges[a] = kit.build_wedge(a)
         log.info("Wedge %.0f deg: reference axis %.1f mm from the lip", a, placements[a])
+    if not wedges:
+        raise SystemExit("no wedge angle fits between the cover and the toolhead")
     self_check(kit, wedges, placements, plate, cradle)
 
     os.makedirs(args.out, exist_ok=True)
@@ -414,6 +458,7 @@ def write_viewer(kit: Kit, wedges, placements, plate, cradle, out: str) -> None:
                     "fixed": [names["plate"], names[f"wedge_{a:.0f}"]], "cradle": names["cradle"],
                     "case_base": names[f"case_{vname}_base"], "case_lid": names[f"case_{vname}_lid"],
                     "upside_down": rot == 180, "slope": kit.kp.below_slope_deg, "gap": kit.kp.below_gap,
+                    "toolhead": [kit.kp.toolhead_dy, kit.kp.toolhead_dz],
                     "plate_h": kit.mp.plate_h, "axis_from_wall": placements[a]}
     with open(os.path.join(out, "viewer_kit.json"), "w") as f:
         json.dump({"files": sorted(set(names.values())), "configs": configs}, f, indent=1)
