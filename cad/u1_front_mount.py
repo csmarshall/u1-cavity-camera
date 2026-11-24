@@ -166,11 +166,12 @@ class Geometry:
         self.cradle_x1 = cp.out_x1 - mp.end_margin
         # Mount frame = world for "above"; for "below" the world is the mount frame
         # turned 180 deg about the wall normal, and the hinge turns the other way.
-        if mp.orientation == "portrait" and mp.mount_side == "below":
+        if mp.orientation == "portrait" and mp.mount_side == "below" and mp.below_slope_deg <= 0:
             # Hanging 82 mm below the hinge, looking down swings the case's lower end
-            # ~L*sin(tilt) toward the wall: the arm would need ~97 mm for 75 deg.
-            raise ValueError("portrait + below is not supported: the hinge arm would have to stand "
-                             "~100 mm off the wall. Use portrait above, or landscape below.")
+            # ~L*sin(tilt) toward the wall. Against a vertical wall that needs a
+            # ~100 mm arm; it only works when the cover slopes away under the lip.
+            raise ValueError("portrait + below needs the cover slope under the lip (--below-slope, MEASURE); "
+                             "against a vertical wall the arm would be ~100 mm")
         self.sign = 1.0 if mp.mount_side == "above" else -1.0
         # The hinge sits hinge_z from the plate edge nearest the camera: the bottom edge
         # for "above"; for "below" the mount frame is flipped, so measure from the top
@@ -606,13 +607,13 @@ VIEWER_CONFIGS = [
     ("landscape_above", "Hinge: landscape, camera above the feature", {}, None, {}),
     ("landscape_below", "Hinge: landscape, camera below the feature (end hinge)", {"mount_side": "below"}, None, {}),
     ("portrait_above", "Hinge: portrait 9:16, above, cable out the top end", {"orientation": "portrait"}, None, {}),
-    ("portrait_above_sideA", "Hinge: portrait, cable corner A (top, case +Y), hinge -X end", {"orientation": "portrait"},
+    ("portrait_above_sideA", "Portrait, cable corner A: top, world +X side (case +Y), hinge at -X end", {"orientation": "portrait"},
      None, {"cable_exit": "side_end", "cable_side": 1}),
-    ("portrait_above_sideB", "Hinge: portrait, cable corner B (bottom, case -Y), hinge -X end", {"orientation": "portrait"},
+    ("portrait_above_sideB", "Portrait, cable corner B: top, world -X side (case -Y), hinge at -X end", {"orientation": "portrait"},
      None, {"cable_exit": "side_end", "cable_side": -1}),
-    ("portrait_above_sideC", "Hinge: portrait, cable corner C (top, case +Y), hinge +X end (flip H+V in Mainsail)",
+    ("portrait_above_sideC", "Portrait, cable corner C: bottom, world -X side (case +Y), hinge at +X end, flip H+V in Mainsail",
      {"orientation": "portrait", "hinge_end": 1}, None, {"cable_exit": "side_end", "cable_side": 1}),
-    ("portrait_above_sideD", "Hinge: portrait, cable corner D (bottom, case -Y), hinge +X end (flip H+V in Mainsail)",
+    ("portrait_above_sideD", "Portrait, cable corner D: bottom, world +X side (case -Y), hinge at +X end, flip H+V in Mainsail",
      {"orientation": "portrait", "hinge_end": 1}, None, {"cable_exit": "side_end", "cable_side": -1}),
     ("below_slope20_t45", "EXAMPLE: below the lip, cover sloped 20 deg (slope not yet measured), tilt to 45",
      {"mount_side": "below", "below_slope_deg": 20.0, "tilt_max": 45.0}, None, {}),
