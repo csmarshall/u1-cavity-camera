@@ -48,7 +48,9 @@ log = logging.getLogger("u1_wedge_kit")
 @dataclass
 class KitParams:
     angles: Tuple[float, ...] = (30.0, 45.0, 60.0, 75.0)
-    below_slope_deg: float = 35.0    # ASSUMED (MEASURE): cover face below the lip, outward from vertical
+    below_slope_deg: float = 30.0    # ASSUMED (MEASURE): outer shell below the lip, outward from vertical
+                                     # (Charles: shell ~45-60 deg; 30 from vertical = 60 from horizontal, conservative)
+    below_gap: float = 20.0          # ASSUMED (MEASURE): open gap behind the lip plane under its bottom edge (~20-30 mm)
     # Dovetail rail on the plate (profile in YZ, running along X)
     rail_base_w: float = 8.0         # width at the plate face (Z)
     rail_h: float = 3.0              # height off the plate face (Y)
@@ -96,7 +98,8 @@ class Kit:
         # Universal cradle length: symmetric about the lens and inside every variant's ends
         half = min(min(-v.out_x0, v.out_x1) for v in self.variants.values())
         self.mp = fm.MountParams(orientation="portrait", mount_side="below", hinge_end=-1,
-                                 below_slope_deg=kp.below_slope_deg, floor_t=kp.cradle_floor_t,
+                                 below_slope_deg=kp.below_slope_deg, below_gap=kp.below_gap,
+                                 floor_t=kp.cradle_floor_t,
                                  tilt_max=0.0, tilt_step=5.0)
         self.g = fm.Geometry(self.cp, self.mp)
         self.g.cradle_x0, self.g.cradle_x1 = -(half - self.mp.end_margin), half - self.mp.end_margin
@@ -331,13 +334,15 @@ def main() -> None:
     ap.add_argument("--angles", type=float, nargs="+", default=list(KitParams.angles))
     ap.add_argument("--slope", type=float, default=KitParams.below_slope_deg,
                     help="cover face below the lip, deg from vertical (ASSUMED until measured)")
+    ap.add_argument("--gap", type=float, default=KitParams.below_gap,
+                    help="open gap behind the lip plane under its bottom edge, mm (ASSUMED until measured)")
     ap.add_argument("--viewer", action="store_true", help="also write viewer meshes + viewer_kit.json")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"),
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
     logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%Y-%m-%dT%H:%M:%S%z")
-    kp = KitParams(angles=tuple(args.angles), below_slope_deg=args.slope)
+    kp = KitParams(angles=tuple(args.angles), below_slope_deg=args.slope, below_gap=args.gap)
     log.debug("Kit parameters: %s", asdict(kp))
     kit = Kit(kp)
     plate, cradle = kit.build_plate(), kit.build_cradle()
@@ -350,7 +355,7 @@ def main() -> None:
     self_check(kit, wedges, placements, plate, cradle)
 
     os.makedirs(args.out, exist_ok=True)
-    tag = f"slope{kp.below_slope_deg:.0f}"
+    tag = f"gap{kp.below_gap:.0f}_slope{kp.below_slope_deg:.0f}"
     files = {"kit_wall_plate.stl": Kit.print_back_down(plate, 0.0),
              "kit_cradle_universal.stl": kit.print_cradle(cradle)}
     for a, w in wedges.items():
@@ -408,7 +413,7 @@ def write_viewer(kit: Kit, wedges, placements, plate, cradle, out: str) -> None:
                     "angle": a, "m0": m0, "case_rot": rot,
                     "fixed": [names["plate"], names[f"wedge_{a:.0f}"]], "cradle": names["cradle"],
                     "case_base": names[f"case_{vname}_base"], "case_lid": names[f"case_{vname}_lid"],
-                    "upside_down": rot == 180, "slope": kit.kp.below_slope_deg,
+                    "upside_down": rot == 180, "slope": kit.kp.below_slope_deg, "gap": kit.kp.below_gap,
                     "plate_h": kit.mp.plate_h, "axis_from_wall": placements[a]}
     with open(os.path.join(out, "viewer_kit.json"), "w") as f:
         json.dump({"files": sorted(set(names.values())), "configs": configs}, f, indent=1)

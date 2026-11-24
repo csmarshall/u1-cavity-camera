@@ -80,6 +80,9 @@ class MountParams:
     # from the printer) at this angle from vertical, so a camera hanging below
     # can tuck back under the lip. 0 = treat it as a vertical wall (conservative).
     below_slope_deg: float = 0.0
+    # Open gap behind the lip plane directly under the lip's bottom edge, before the
+    # outer shell starts (Charles: ~20-30 mm, MEASURE). The slope applies from there.
+    below_gap: float = 0.0
 
     # --- Hinge ---
     knuckle_r: float = 4.0        # outer radius of every knuckle
@@ -253,7 +256,9 @@ class Geometry:
         """
         mp = self.mp
         lip_and_above = _box(-500, 500, -100, 0, 0, 500)
-        below = _box(-500, 500, -500, 0, -500, 0.01).rotate((0, 0, 0), (1, 0, 0), -mp.below_slope_deg)
+        g_ = mp.below_gap
+        below = (_box(-500, 500, -500, -g_, -500, 0.01)
+                 .rotate((0, -g_, 0), (1, -g_, 0), -mp.below_slope_deg))
         return self.to_world(lip_and_above.union(below))   # to_world is its own inverse
 
     def side_notch(self):
@@ -457,6 +462,8 @@ def validate(g: Geometry) -> None:
         raise ValueError("hinge_end must be -1 or +1")
     if mp.hinge_end > 0 and cp.cable_exit == "end":
         raise ValueError("hinge at the +X end needs a side cable exit: the end nozzle is there")
+    if mp.below_gap < 0:
+        raise ValueError("below_gap must be >= 0")
     if mp.below_slope_deg < 0 or mp.below_slope_deg >= 80:
         raise ValueError("below_slope_deg must be in [0, 80)")
     if mp.mount_side not in ("above", "below"):
