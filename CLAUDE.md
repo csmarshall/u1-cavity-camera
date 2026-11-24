@@ -95,5 +95,6 @@ After a successful build, copy the printable outputs into the committed folders:
 
 ## Repo / GitHub
 
-- The intended public repo is `csmarshall/snapmaker-u1-camera-mount` with the MIT license. It **wasn't created yet** because the earlier session couldn't create repos. Once Charles creates it empty, run `git remote add origin git@github.com:csmarshall/snapmaker-u1-camera-mount.git && git push -u origin main`.
-- A hosted copy of the viewer exists as a private claude.ai artifact. `viewer/index.html` here is the source of truth.
+- Public repo: `csmarshall/u1-cavity-camera` (MIT). Created 2026-11-24 from this folder; the local folder keeps its old name `snapmaker-u1-camera-mount`.
+- A hosted copy of the viewer is a private claude.ai artifact (https://claude.ai/artifact/D1nHFNPtZcMUNYMGVeL5zH). `viewer/index.html` here is the source of truth; `tools/build_viewer.py` rebuilds it.
+- The mount lives in `cad/u1_front_mount.py` (`--side above|below`, `--orientation landscape|portrait`, `--cable-exit end|side_end`, `--cable-side 1|-1`, `--wedge-angle N`, `--viewer`).
