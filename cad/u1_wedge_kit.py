@@ -530,8 +530,8 @@ def explorer_block(kit: Kit, names: Dict[str, str]) -> dict:
     Data for the viewer's "Pose explorer": the case->world matrix at tilt 0 with the hinge
     axis on the lip face (axis_Y = 0, drop 0), plus the world point of that axis. The viewer poses
         world = Translate(0, dy, dz) * R_x(-a about axis) * m0_0 * Translate_case(-s, 0, 0)
-    where s = t * (cradle_x1 - cradle_x0 - pad_w) is the camera shift up its own axis (the wedge plate end and pad stay fixed;
-    sliding the attachment down the cradle back slides the camera up). It is asserted here against the real pose, fm._case_to_world, for several (a, axis_Y, drop).
+    where s = t * (cradle_x1 - cradle_x0 - pad_w) is the camera shift up its own axis (the camera slides up its own axis; the viewer re-places the wedge pad on the cradle back
+    at the case X whose world Z equals the rail centre, clamped to the cradle). It is asserted here against the real pose, fm._case_to_world, for several (a, axis_Y, drop).
     A positive drop hangs the camera lower, so dz = -drop (the mount frame is flipped for "below").
     """
     g = kit.g

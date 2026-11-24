@@ -194,11 +194,29 @@ const updExplorer=()=>{
  [['case',boxPts(base)],['cradle',boxPts(cradleMesh)],['nozzle tip',[tip]]].forEach(([n,pts])=>pts.forEach(p=>obstacleHits(p).forEach(o=>hit.add(n+' x '+o))));
  const bad=hit.size>0;[base,lid].forEach(o=>o.material.color.setHex(bad?0xd93a3a:0x3a9a55));
  $('eStat').textContent=bad?'COLLISION: '+[...hit].join('; '):'Clear (approximate check)';$('eStat').style.color=bad?'#d93a3a':'#2f8a4b';
- // wedge preview: hull of the plate-face patch and the pad on the cradle back
- const xa=EXPL.cradle_x0+EXPL.pad_x/2;   // pad is fixed in the world at its t=0 spot; the camera slides instead
- const pad=[-1,1].flatMap(sx=>[-1,1].map(sy=>new THREE.Vector3(xa+sx*EXPL.pad_x/2,sy*EXPL.pad_y/2,EXPL.floor_bot).applyMatrix4(M0)));
+ // wedge preview: hull of the plate-face patch and the pad on the cradle back, placed with the CURRENT (shifted) pose
+ const padHalf=EXPL.pad_x/2,railZ=EXPL.slab.z/2,Mc=caseGroup.matrix;
+ const zAt=x=>new THREE.Vector3(x,0,EXPL.floor_bot).applyMatrix4(Mc).z;
+ const z0=zAt(0),dzdx=zAt(1)-z0;
+ let xc=Math.abs(dzdx)>1e-6?(railZ-z0)/dzdx:(EXPL.cradle_x0+EXPL.cradle_x1)/2;
+ xc=Math.min(Math.max(xc,EXPL.cradle_x0+padHalf),EXPL.cradle_x1-padHalf);
+ const padErr=zAt(xc)-railZ,reach=Math.abs(padErr)<=6;
+ const pad=[-1,1].flatMap(sx=>[-1,1].map(sy=>new THREE.Vector3(xc+sx*padHalf,sy*EXPL.pad_y/2,EXPL.floor_bot).applyMatrix4(Mc)));
  const face=[-1,1].flatMap(sx=>EXPL.face_z.map(z=>new THREE.Vector3(sx*EXPL.face_x,EXPL.plate_t,z)));
- wedgeMesh.geometry.dispose();wedgeMesh.geometry=new ConvexGeometry([...face,...pad]);wedgeMesh.visible=$('eWedge').checked;
+ const hullV=[...face,...pad];
+ wedgeMesh.geometry.dispose();wedgeMesh.geometry=new ConvexGeometry(hullV);wedgeMesh.visible=$('eWedge').checked;
+ // approximate wedge clash: hull vertices + interior samples vs cover/toolhead, case bbox sample points vs hull
+ const wedgeHit=new Set();
+ {const smp=[...hullV],cen=new THREE.Vector3();hullV.forEach(v=>cen.add(v));cen.multiplyScalar(1/hullV.length);smp.push(cen);
+  for(let i=0;i<hullV.length;i++){smp.push(hullV[i].clone().lerp(cen,.5));for(let j=i+1;j<hullV.length;j++)smp.push(hullV[i].clone().lerp(hullV[j],.5))}
+  smp.forEach(p=>obstacleHits(p).forEach(o=>{if(o!=='plate+rail')wedgeHit.add('wedge x '+o)}));
+  const pos=wedgeMesh.geometry.attributes.position,tris=[];
+  for(let i=0;i+2<pos.count;i+=3){const A=new THREE.Vector3().fromBufferAttribute(pos,i),B=new THREE.Vector3().fromBufferAttribute(pos,i+1),C=new THREE.Vector3().fromBufferAttribute(pos,i+2);
+   const n=new THREE.Vector3().crossVectors(B.clone().sub(A),C.clone().sub(A)).normalize();tris.push([n,n.dot(A)])}
+  if(boxPts(base).some(p=>tris.every(([n,d])=>n.dot(p)<d-.5)))wedgeHit.add('wedge x case');}
+ const wedgeTxt=wedgeHit.size?[...wedgeHit].join('; '):'none';
+ if(!reach){$('eStat').textContent+=" | WARNING: wedge pad can't reach rail height; camera shifted too far";$('eStat').style.color='#d93a3a'}
+ if(wedgeHit.size){$('eStat').textContent+=' | '+wedgeTxt+' (approximate)';$('eStat').style.color='#d93a3a'}
  // bed and footprint
  const zb=-I,bed=[[-135,J],[135,J],[135,J+270],[-135,J+270]].map(([x,y])=>new THREE.Vector3(x,y,zb));
  expBedPts=bed;bedLine.geometry.dispose();bedLine.geometry=new THREE.BufferGeometry().setFromPoints(bed);
@@ -215,8 +233,8 @@ const updExplorer=()=>{
  setPoly(footFill,footLine,foot);
  const showCov=$('eCov').checked;[bedFill,bedLine].forEach(o=>o.visible=showCov);if(!showCov)footFill.visible=footLine.visible=false;
  $('eCovTxt').textContent=foot.length<3?'The frustum misses the bed plane.':`Bed coverage ${pct.toFixed(1)}% of 270 x 270 (stream footprint ${polyArea(foot).toFixed(0)} mm², lens ${apex.z.toFixed(0)} mm vs bed ${zb}).`;
- expResult={a,dy,dz,t,shift,I,J,pct,bad,hits:[...hit],apex:apex.toArray(),M:caseGroup.matrix.toArray()};
- $('eOut').value=`angle_deg      ${a.toFixed(1)}\ndy_mm          ${dy.toFixed(1)}   (hinge axis from lip face)\ndz_mm          ${dz.toFixed(1)}   (+ up)\nattachment     ${t.toFixed(2)}   (0 top end, 1 bottom end)\ncamera_shift_mm ${shift.toFixed(1)}   (camera slides up its own axis)\nI_mm           ${I}   (ASSUMED)\nJ_mm           ${J}   (ASSUMED)\ncoverage_pct   ${pct.toFixed(1)}\ncollisions     ${bad?[...hit].join('; '):'none (approximate)'}`};
+ expResult={a,dy,dz,t,shift,padX:xc,padZErr:padErr,reach,wedgeHits:[...wedgeHit],I,J,pct,bad,hits:[...hit],apex:apex.toArray(),M:caseGroup.matrix.toArray()};
+ $('eOut').value=`angle_deg      ${a.toFixed(1)}\ndy_mm          ${dy.toFixed(1)}   (hinge axis from lip face)\ndz_mm          ${dz.toFixed(1)}   (+ up)\nattachment     ${t.toFixed(2)}   (0 top end, 1 bottom end)\ncamera_shift_mm ${shift.toFixed(1)}   (camera slides up its own axis)\nI_mm           ${I}   (ASSUMED)\nJ_mm           ${J}   (ASSUMED)\npad_center_case_x_mm ${xc.toFixed(1)}   (pad world Z minus rail Z = ${padErr.toFixed(1)} mm${reach?'':"; wedge pad can't reach rail height"})\nwedge_clash    ${wedgeTxt} (approximate)\ncoverage_pct   ${pct.toFixed(1)}\ncollisions     ${bad?[...hit].join('; '):'none (approximate)'}`};
 const applyExplorer=()=>{cur='explorer';const m=MOUNTS[Object.keys(MOUNTS).find(k=>k.endsWith('_d0_'+$('exit').value))];
  $('exRow').style.display='none';$('kitRow').style.display='';$('angDrop').style.display='none';$('mountRow').style.display='';$('expRow').style.display='';
  fixedGroup.clear();fixedGroup.add(new THREE.Mesh(geoF(EXPL.plate),mountMat));
