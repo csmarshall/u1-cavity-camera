@@ -148,6 +148,7 @@ class Kit:
         self.g = fm.Geometry(self.cp, self.mp)
         self.base_axis_Z = self.g.axis_Z
         self.set_drop(kp.drop)
+        self.shift = 0.0                              # camera slid up its own axis, mm (custom pose only)
         self.g.cradle_x0, self.g.cradle_x1 = -(half - self.mp.end_margin), half - self.mp.end_margin
         # The kit plate has no hinge arms: it sits between two ribs on the lip
         hp = kp.rib_spacing / 2 - kp.rib_clear
@@ -168,6 +169,42 @@ class Kit:
         """Hang the camera `drop` mm lower (the below-mode mount frame is flipped, so +Z there is down)."""
         self.g.axis_Z = self.base_axis_Z + drop
         self.drop = drop
+
+    def posed(self, part: cq.Workplane, angle: float) -> cq.Workplane:
+        """
+        Case-frame part -> world at `angle`, with the camera (and its cradle) slid
+        `self.shift` mm up its own axis (toward case -X, which is up in portrait-below).
+        Same composition as the viewer's Pose explorer: m(angle) * Translate_case(-shift, 0, 0).
+        """
+        if self.shift:
+            part = part.translate((-self.shift, 0, 0))
+        return self.g.to_world(self.g.pose(part, angle))
+
+    def _pad_world_z(self, x: float, angle: float) -> float:
+        return self.posed(cq.Workplane().add(cq.Vertex.makeVertex(x, 0, self.g.floor_bot)), angle).val().Z
+
+    def rail_height_x(self, angle: float) -> float:
+        """Cradle-frame X on the floor's outer centre line whose world Z is the rail centre (Z is linear in x)."""
+        x0, x1 = self.g.cradle_x0, self.g.cradle_x1
+        z0, z1 = self._pad_world_z(x0, angle), self._pad_world_z(x1, angle)
+        if abs(z1 - z0) < 1e-9:
+            return 0.0
+        return x0 + (self.rail_c - z0) * (x1 - x0) / (z1 - z0)
+
+    def pad_pair(self, angle: float) -> Tuple[float, float]:
+        """
+        The two adjacent key pockets the long pad spans: the pair whose centre is nearest
+        rail height, so the wedge is a short, square-on fill between plate face and cradle
+        back. At shift 0 this is the top + middle pair (the kit's original choice).
+        """
+        target = self.rail_height_x(angle)
+        pairs = list(zip(self.key_xs[:-1], self.key_xs[1:]))
+        best = min(pairs, key=lambda p: abs((p[0] + p[1]) / 2 - target))
+        xc = (best[0] + best[1]) / 2
+        log.debug("%.0f deg, shift %.1f: rail height at cradle x=%.2f; pad on pockets %s (centre %.2f, "
+                  "world Z off rail by %.2f mm)", angle, self.shift, target, best, xc,
+                  self._pad_world_z(xc, angle) - self.rail_c)
+        return best
 
     # ---------- plate ----------
     def rail(self, grow: float = 0.0, x0=None, x1=None) -> cq.Workplane:
@@ -242,7 +279,7 @@ class Kit:
 
         def clear(ay: float) -> bool:
             g.axis_Y = ay
-            return all(_ivol(world(g.pose(p, angle)), cover_w) < 1e-3 for p in parts)
+            return all(_ivol(self.posed(p, angle), cover_w) < 1e-3 for p in parts)
 
         lo = self.mp.plate_t + kp.rail_h + kp.lip_gap
         # Moving out from the lip first frees the cover, then (further out) runs into the
@@ -280,14 +317,15 @@ class Kit:
         # with the pad's upper edge, bottom with lower, -X with -X.
         hp = kp.pad_w / 2
 
-        # Long pad from the top pocket to the middle pocket: two keys, two M3 screws,
-        # ~3x the contact area of one key and no twist (Charles's call)
-        x_top, x_mid = self.key_xs[0], self.key_xs[1]
+        # Long pad across two adjacent pockets: two keys, two M3 screws, ~3x the contact
+        # area of one key and no twist (Charles's call). Which pair depends on the camera
+        # shift: the one nearest rail height (top + middle when unshifted).
+        x_top, x_mid = self.pad_pair(angle)
         xk = (x_top + x_mid) / 2
         hp = (x_mid - x_top) / 2 + kp.pad_w / 2
 
         def pad(x, y):
-            v = g.to_world(g.pose(cq.Workplane().add(cq.Vertex.makeVertex(x, y, g.floor_bot)), angle)).val()
+            v = self.posed(cq.Workplane().add(cq.Vertex.makeVertex(x, y, g.floor_bot)), angle).val()
             return cq.Vector(*v.toTuple())
 
         lower = sorted([pad(xk + hp, -w), pad(xk + hp, w)], key=lambda v: v.x)   # (-X, +X) in world
@@ -321,8 +359,8 @@ class Kit:
                 dir=cq.Vector(0, 0, -1)))
             key_local = kb if key_local is None else key_local.union(kb)
             pilots_local.append(pb)
-        key = g.to_world(g.pose(key_local, angle))
-        pilots = [g.to_world(g.pose(pb, angle)) for pb in pilots_local]
+        key = self.posed(key_local, angle)
+        pilots = [self.posed(pb, angle) for pb in pilots_local]
         # Drill the body first, then add pre-drilled keys: drilling after the union
         # makes OCC return a null shape at some angles
         body = hull
@@ -417,7 +455,7 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
             raise RuntimeError(f"{a:.0f} deg: lens points {d}, expected {want}")
         th = kit.toolhead()
         for part in [kit.build_cradle()] + kit.moving_parts()[1:]:
-            if _ivol(g.to_world(g.pose(part, a)), th) > 1e-3:
+            if _ivol(kit.posed(part, a), th) > 1e-3:
                 raise RuntimeError(f"{a:.0f} deg: the camera or cradle reaches the toolhead keep-out")
         if _ivol(wedge, th) > 1e-3:
             raise RuntimeError(f"{a:.0f} deg wedge reaches the toolhead keep-out")
@@ -435,11 +473,11 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
             uncovered = 0.0
         if uncovered > 0.01 * _vol(rail_env):
             raise RuntimeError(f"{a:.0f} deg wedge does not surround the rail")
-        posed_cradle = g.to_world(g.pose(cradle, a))
+        posed_cradle = kit.posed(cradle, a)
         if _ivol(wedge, posed_cradle) > 1e-3:
             raise RuntimeError(f"{a:.0f} deg wedge interferes with the cradle")
         for part in kit.moving_parts()[1:]:
-            if _ivol(g.to_world(g.pose(part, a)), wedge) > 1e-3:
+            if _ivol(kit.posed(part, a), wedge) > 1e-3:
                 raise RuntimeError(f"{a:.0f} deg wedge interferes with a case")
     printables = {"plate": Kit.print_back_down(plate, 0.0), "cradle": kit.print_cradle(cradle)}
     printables.update({f"wedge {a:.0f}": kit.print_wedge(w) for a, w in wedges.items()})
@@ -463,6 +501,29 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
              len(wedges))
 
 
+def build_custom_pose(kit: Kit, plate: cq.Workplane, cradle: cq.Workplane,
+                      angle: float, dy: float, dz: float, shift: float, out: str) -> str:
+    """
+    One wedge for a pose picked in the viewer's Pose explorer, then the full self_check
+    (cover, toolhead, plate/rail, every case variant both ways, printability). Explorer
+    semantics: dy is the hinge-reference axis from the lip face (axis_Y), dz is + up so
+    drop = -dz, and the camera with its cradle slides `shift` mm up its own axis.
+    Returns the STL path.
+    """
+    kit.set_drop(-dz)
+    kit.shift = shift
+    kit.g.axis_Y = dy
+    log.info("Custom pose: %.1f deg, dy %.1f, dz %.1f, camera shift %.1f mm", angle, dy, dz, shift)
+    wedge = kit.build_wedge(angle)
+    self_check(kit, {angle: wedge}, {angle: dy}, plate, cradle)
+    os.makedirs(out, exist_ok=True)
+    name = f"pose_wedge_{angle:g}deg_dy{dy:g}_dz{dz:g}_shift{shift:g}.stl"
+    path = os.path.join(out, name)
+    cq.exporters.export(kit.print_wedge(wedge), path, tolerance=0.02, angularTolerance=0.1)
+    log.info("Wrote %s", path)
+    return path
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="out")
@@ -473,6 +534,9 @@ def main() -> None:
                     help="open gap behind the lip plane under its bottom edge, mm (ASSUMED until measured)")
     ap.add_argument("--drop", type=float, default=KitParams.drop, help="hang the camera this much lower, mm")
     ap.add_argument("--viewer", action="store_true", help="also write viewer meshes + viewer_kit.json")
+    ap.add_argument("--pose", type=float, nargs=4, metavar=("ANGLE", "DY", "DZ", "SHIFT"),
+                    help="build one wedge for a Pose-explorer export instead of the kit series: angle_deg, "
+                         "dy_mm, dz_mm (+ up), camera_shift_mm")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"),
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
@@ -482,6 +546,9 @@ def main() -> None:
     log.debug("Kit parameters: %s", asdict(kp))
     kit = Kit(kp)
     plate, cradle = kit.build_plate(), kit.build_cradle()
+    if args.pose:
+        build_custom_pose(kit, plate, cradle, *args.pose, out=args.out)
+        return
     parts = kit.moving_parts()
     wedges, placements = {}, {}
     skipped = []
