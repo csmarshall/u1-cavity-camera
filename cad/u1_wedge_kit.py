@@ -529,8 +529,9 @@ def explorer_block(kit: Kit, names: Dict[str, str]) -> dict:
     """
     Data for the viewer's "Pose explorer": the case->world matrix at tilt 0 with the hinge
     axis on the lip face (axis_Y = 0, drop 0), plus the world point of that axis. The viewer poses
-        world = Translate(0, dy, dz) * R_x(-a about axis) * m0_0
-    which is asserted here against the real pose, fm._case_to_world, for several (a, axis_Y, drop).
+        world = Translate(0, dy, dz) * R_x(-a about axis) * m0_0 * Translate_case(-s, 0, 0)
+    where s = t * (cradle_x1 - cradle_x0 - pad_w) is the camera shift up its own axis (the wedge plate end and pad stay fixed;
+    sliding the attachment down the cradle back slides the camera up). It is asserted here against the real pose, fm._case_to_world, for several (a, axis_Y, drop).
     A positive drop hangs the camera lower, so dz = -drop (the mount frame is flipped for "below").
     """
     g = kit.g
@@ -541,13 +542,14 @@ def explorer_block(kit: Kit, names: Dict[str, str]) -> dict:
     for a, ay, drop in ((20.0, 0.0, 0.0), (45.0, 33.0, 0.0), (60.0, 12.5, 7.0), (85.0, 40.0, 15.0)):
         kit.set_drop(drop)
         g.axis_Y = ay
-        want = fm._case_to_world(g, a)
+        shift = 0.0 if a < 30 else 0.7 * (g.cradle_x1 - g.cradle_x0 - kit.kp.pad_w)
+        want = fm._matmul(fm._case_to_world(g, a), [1, 0, 0, -shift, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
         trans = [1, 0, 0, 0, 0, 1, 0, ay, 0, 0, 1, -drop, 0, 0, 0, 1]
-        got = fm._matmul(trans, fm._matmul(fm._rot_x_about(axis, -a), m0))
+        got = fm._matmul(fm._matmul(trans, fm._matmul(fm._rot_x_about(axis, -a), m0)), [1, 0, 0, -shift, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1])
         err = max(abs(x - y) for x, y in zip(want, got))
         log.debug("Explorer formula at a=%.0f axis_Y=%.1f drop=%.1f: max error %.2e", a, ay, drop, err)
         if err > 1e-6:
-            raise RuntimeError(f"explorer pose formula disagrees with the CAD pose at a={a}, axis_Y={ay}, drop={drop}")
+            raise RuntimeError(f"explorer pose formula disagrees with the CAD pose at a={a}, axis_Y={ay}, drop={drop}, shift={shift}")
     kit.set_drop(0.0)
     g.axis_Y = 0.0
     mp, kp = kit.mp, kit.kp

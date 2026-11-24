@@ -30,8 +30,8 @@ button{font:inherit;padding:4px 10px;border-radius:7px;border:1px solid var(--li
  <div class="row" id="expRow" style="display:none">
   <div class="k">Tilt: <b id="eAv"></b></div><input type="range" id="eA" min="20" max="85" step="0.5" value="45">
   <div class="k">Distance from lip, dy (hinge axis, mm): <b id="eYv"></b></div><input type="range" id="eY" min="0" max="100" step="0.5" value="30">
-  <div class="k">Hang height, dz (mm, + is up): <b id="eZv"></b></div><input type="range" id="eZ" min="-40" max="30" step="0.5" value="0">
-  <div class="k">Attachment on cradle back (0 top end, 1 bottom end): <b id="eTv"></b></div><input type="range" id="eT" min="0" max="1" step="0.01" value="0">
+  <div class="k">Hang height, dz (mm, + is up): <b id="eZv"></b></div><input type="range" id="eZ" min="-40" max="60" step="0.5" value="0">
+  <div class="k">Attachment point (slides the camera up its own axis): <b id="eTv"></b></div><input type="range" id="eT" min="0" max="1" step="0.01" value="0">
   <div class="k" style="margin-top:6px">I: lip bottom edge to bed (mm) <b style="color:#b36b00">ASSUMED</b> <input type="number" id="eI" value="150" step="1" style="width:64px"></div>
   <div class="k">J: lip face to bed front edge (mm) <b style="color:#b36b00">ASSUMED</b> <input type="number" id="eJ" value="20" step="1" style="width:64px"></div>
   <label><input type="checkbox" id="eWedge" checked><span class="sw" style="background:#a65d9b"></span>Wedge preview (hull, plate to pad)</label>
@@ -147,12 +147,12 @@ const upd=()=>{const isCase=cur==='case',e=isCase?+$('ex').value:0;
  base.visible=$('tBase').checked;lid.visible=$('tLid').checked;mod.visible=$('tMod').checked;fov.visible=$('tFov').checked;
  fixedGroup.visible=!isCase&&$('tMount').checked;cradleMesh.visible=!isCase&&$('tMount').checked;
  wall.visible=!isCase;thMesh.visible=!isCase;clip.constant=+$('cut').value};
-/* ---- Pose explorer: world = T(0,dy,dz) * R_x(-a about EXPL.axis) * m0_0 (asserted against the CAD pose in explorer_block) ---- */
+/* ---- Pose explorer: world = T(0,dy,dz) * R_x(-a about EXPL.axis) * m0_0 * T_case(-s,0,0), s=camera shift (asserted against the CAD pose in explorer_block) ---- */
 const D2R=Math.PI/180;
 const rotXabout=(py,pz,deg)=>{const c=Math.cos(deg*D2R),sn=Math.sin(deg*D2R);
  return new THREE.Matrix4().set(1,0,0,0, 0,c,-sn,py-c*py+sn*pz, 0,sn,c,pz-sn*py-c*pz, 0,0,0,1)};
-const explorerMatrix=(a,dy,dz)=>new THREE.Matrix4().makeTranslation(0,dy,dz)
- .multiply(rotXabout(EXPL.axis[1],EXPL.axis[2],-a)).multiply(new THREE.Matrix4().set(...EXPL.m0));
+const explorerMatrix=(a,dy,dz,s=0)=>new THREE.Matrix4().makeTranslation(0,dy,dz)
+ .multiply(rotXabout(EXPL.axis[1],EXPL.axis[2],-a)).multiply(new THREE.Matrix4().set(...EXPL.m0)).multiply(new THREE.Matrix4().makeTranslation(-s,0,0));
 const expGroup=new THREE.Group();expGroup.visible=false;s.add(expGroup);
 const wedgeMat=new THREE.MeshStandardMaterial({color:0xa65d9b,transparent:true,opacity:.45,side:THREE.DoubleSide,depthWrite:false});
 const wedgeMesh=new THREE.Mesh(new THREE.BufferGeometry(),wedgeMat);
@@ -185,7 +185,8 @@ const setPoly=(mesh,line,poly)=>{mesh.visible=line.visible=poly.length>=3;if(pol
 const updExplorer=()=>{
  const a=+$('eA').value,dy=+$('eY').value,dz=+$('eZ').value,t=+$('eT').value,I=+$('eI').value,J=+$('eJ').value;
  $('eAv').textContent=a.toFixed(1)+'°';$('eYv').textContent=dy.toFixed(1);$('eZv').textContent=dz.toFixed(1);$('eTv').textContent=t.toFixed(2);
- caseGroup.matrix.copy(explorerMatrix(a,dy,dz));caseGroup.updateMatrixWorld(true);
+ const shift=t*(EXPL.cradle_x1-EXPL.cradle_x0-EXPL.pad_x);const M0=explorerMatrix(a,dy,dz,0);
+ caseGroup.matrix.copy(explorerMatrix(a,dy,dz,shift));caseGroup.updateMatrixWorld(true);
  // collisions: case + cradle bbox corners and edge midpoints, and the nozzle tip
  const [vn,rot]=$('exit').value.split('_');
  const tip=new THREE.Vector3(...EXPL.nozzle_tips[vn]).applyMatrix4(caseInner.matrixWorld);
@@ -194,8 +195,8 @@ const updExplorer=()=>{
  const bad=hit.size>0;[base,lid].forEach(o=>o.material.color.setHex(bad?0xd93a3a:0x3a9a55));
  $('eStat').textContent=bad?'COLLISION: '+[...hit].join('; '):'Clear (approximate check)';$('eStat').style.color=bad?'#d93a3a':'#2f8a4b';
  // wedge preview: hull of the plate-face patch and the pad on the cradle back
- const xa=EXPL.cradle_x0+EXPL.pad_x/2+t*(EXPL.cradle_x1-EXPL.cradle_x0-EXPL.pad_x);
- const pad=[-1,1].flatMap(sx=>[-1,1].map(sy=>new THREE.Vector3(xa+sx*EXPL.pad_x/2,sy*EXPL.pad_y/2,EXPL.floor_bot).applyMatrix4(caseGroup.matrix)));
+ const xa=EXPL.cradle_x0+EXPL.pad_x/2;   // pad is fixed in the world at its t=0 spot; the camera slides instead
+ const pad=[-1,1].flatMap(sx=>[-1,1].map(sy=>new THREE.Vector3(xa+sx*EXPL.pad_x/2,sy*EXPL.pad_y/2,EXPL.floor_bot).applyMatrix4(M0)));
  const face=[-1,1].flatMap(sx=>EXPL.face_z.map(z=>new THREE.Vector3(sx*EXPL.face_x,EXPL.plate_t,z)));
  wedgeMesh.geometry.dispose();wedgeMesh.geometry=new ConvexGeometry([...face,...pad]);wedgeMesh.visible=$('eWedge').checked;
  // bed and footprint
@@ -214,8 +215,8 @@ const updExplorer=()=>{
  setPoly(footFill,footLine,foot);
  const showCov=$('eCov').checked;[bedFill,bedLine].forEach(o=>o.visible=showCov);if(!showCov)footFill.visible=footLine.visible=false;
  $('eCovTxt').textContent=foot.length<3?'The frustum misses the bed plane.':`Bed coverage ${pct.toFixed(1)}% of 270 x 270 (stream footprint ${polyArea(foot).toFixed(0)} mm², lens ${apex.z.toFixed(0)} mm vs bed ${zb}).`;
- expResult={a,dy,dz,t,I,J,pct,bad,hits:[...hit],apex:apex.toArray(),M:caseGroup.matrix.toArray()};
- $('eOut').value=`angle_deg      ${a.toFixed(1)}\ndy_mm          ${dy.toFixed(1)}   (hinge axis from lip face)\ndz_mm          ${dz.toFixed(1)}   (+ up)\nattachment     ${t.toFixed(2)}   (0 top end, 1 bottom end)\nI_mm           ${I}   (ASSUMED)\nJ_mm           ${J}   (ASSUMED)\ncoverage_pct   ${pct.toFixed(1)}\ncollisions     ${bad?[...hit].join('; '):'none (approximate)'}`};
+ expResult={a,dy,dz,t,shift,I,J,pct,bad,hits:[...hit],apex:apex.toArray(),M:caseGroup.matrix.toArray()};
+ $('eOut').value=`angle_deg      ${a.toFixed(1)}\ndy_mm          ${dy.toFixed(1)}   (hinge axis from lip face)\ndz_mm          ${dz.toFixed(1)}   (+ up)\nattachment     ${t.toFixed(2)}   (0 top end, 1 bottom end)\ncamera_shift_mm ${shift.toFixed(1)}   (camera slides up its own axis)\nI_mm           ${I}   (ASSUMED)\nJ_mm           ${J}   (ASSUMED)\ncoverage_pct   ${pct.toFixed(1)}\ncollisions     ${bad?[...hit].join('; '):'none (approximate)'}`};
 const applyExplorer=()=>{cur='explorer';const m=MOUNTS[Object.keys(MOUNTS).find(k=>k.endsWith('_d0_'+$('exit').value))];
  $('exRow').style.display='none';$('kitRow').style.display='';$('angDrop').style.display='none';$('mountRow').style.display='';$('expRow').style.display='';
  fixedGroup.clear();fixedGroup.add(new THREE.Mesh(geoF(EXPL.plate),mountMat));
