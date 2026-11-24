@@ -64,7 +64,7 @@ The predecessor was the ELP-USB8MP05AF-V62 (8 MP IMX179, 62.3 × 9 × 6 mm), dro
    - The nozzle-to-snap-release-window gap is only **0.10 mm**. Consider moving the hook or nozzle, or shrinking the window.
    - Hook strain is at 1.93% against a 2% limit. That's fine for PETG; check it if the material changes.
 3. **Add a camera-view preview to the viewer**: a frustum or projected footprint on a 270 mm bed at the chosen tilt and height.
-4. **Test coupons**: print a small snap-hook and pocket coupon and a nozzle stub before committing to a full print.
+4. **Test coupons**: the snap coupon is done (`stl/elp_16mp_coupon_*.stl`, `coupon_l`). It matters because the hooks flex across layer lines and the 0.7 mm barb catch face prints as an unsupported overhang. A nozzle stub is still to do.
 5. After measuring the real board, update the parameters and rerun.
 
 ## Commands

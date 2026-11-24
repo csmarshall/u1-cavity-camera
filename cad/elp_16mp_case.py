@@ -117,6 +117,13 @@ class Params:
     rib_w: float = 0.7
     rib_preload: float = 0.1     # ribs stop this far short of the PCB (print tolerance)
 
+    # --- Snap test coupon ---
+    # The hooks flex across FDM layer lines (lid prints face down, arms stand
+    # vertical), so the bulk-material strain check is optimistic. Print this
+    # slice of the -X end (base + lid, hook at y=0) to test the click and the
+    # release before committing to a full case.
+    coupon_l: float = 12.0       # length of the slice from the -X outer face
+
     # --- Derived geometry ---
     @property
     def bay(self): return self.cable_bay_l if self.cable_exit == "end" else 0.0
@@ -262,6 +269,12 @@ def validate(p: Params) -> None:
                 if gap < min_web:
                     raise ValueError(f"cable-end snap pocket is only {gap:.2f} mm from the cable slot")
                 log.debug("Cable-end hook web to slot %.2f mm", gap)
+
+    if p.closure == "snap":
+        h = p.hooks()[0]
+        # The coupon must contain the whole pocket plus a solid wall stub past it
+        if p.out_x0 + p.coupon_l < h["x_pocket_in"] + min_web + 2.0:
+            raise ValueError("coupon_l too short to contain the -X snap pocket and a wall stub")
 
     outer_d = p.window_d_at(p.front_gap + p.lid_t)
     if outer_d / 2 + abs(p.lens_y) > p.out_w / 2 - min_web:
@@ -422,6 +435,17 @@ def build_lid(p: Params) -> cq.Workplane:
     return lid
 
 
+def coupon_box(p: Params) -> cq.Workplane:
+    """Bounding slab for the snap test coupon: the -X end of the case, coupon_l long."""
+    return _box(p.out_x0 - 1, p.out_x0 + p.coupon_l, -50, 50, -1, 50)
+
+
+def build_coupon(p: Params, base: cq.Workplane, lid: cq.Workplane) -> tuple:
+    """Slice the -X end off base and lid (assembled position) for a print test of the snap."""
+    box = coupon_box(p)
+    return base.intersect(box), lid.intersect(box)
+
+
 def mock_module(p: Params) -> cq.Workplane:
     """Rough stand-in for the camera: PCB plus an assumed 8 mm square AF lens block."""
     pcb = _box(-p.pcb_l / 2, p.pcb_l / 2, -p.pcb_w / 2, p.pcb_w / 2, p.z_pcb_bottom, p.z_pcb_top)
@@ -443,12 +467,23 @@ def self_check(p: Params, base: cq.Workplane, lid: cq.Workplane) -> None:
     for name, part in (("base", base), ("lid", lid)):
         if len(part.solids().vals()) != 1 or not part.val().isValid():
             raise RuntimeError(f"{name} is not a single valid solid")
+    if p.closure == "snap":
+        c_base, c_lid = build_coupon(p, base, lid)
+        for name, part in (("coupon base", c_base), ("coupon lid", c_lid)):
+            if len(part.solids().vals()) != 1 or not part.val().isValid():
+                raise RuntimeError(f"{name} is not a single valid solid")
+        # The whole -X hook must be inside the coupon, or it tests a truncated arm
+        hook = _hook(p, p.hooks()[0])
+        kept = hook.intersect(coupon_box(p)).val().Volume()
+        if abs(kept - hook.val().Volume()) > 1e-6:
+            raise RuntimeError("snap coupon truncates the -X hook")
+        log.debug("Coupon: base %.1f mm^3, lid %.1f mm^3", c_base.val().Volume(), c_lid.val().Volume())
     log.info("Self-check passed: single valid solids, no interference with mock module")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", default="out16", help="output directory")
+    ap.add_argument("--out", default="out", help="output directory")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"),
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
@@ -469,7 +504,11 @@ def main() -> None:
 
     os.makedirs(args.out, exist_ok=True)
     # Lid flipped for printing: outer face on the bed, ribs and hooks up, no supports
-    lid_print = lid.translate((0, 0, -(p.base_h + p.lid_t))).rotate((0, 0, 0), (1, 0, 0), 180)
+    def flip_lid(part: cq.Workplane) -> cq.Workplane:
+        """Lid parts go outer face down on the bed: hooks and ribs up, no supports."""
+        return part.translate((0, 0, -(p.base_h + p.lid_t))).rotate((0, 0, 0), (1, 0, 0), 180)
+
+    lid_print = flip_lid(lid)
     exports = {
         "elp_16mp_base.stl": base,
         "elp_16mp_lid.stl": lid_print,
@@ -477,6 +516,10 @@ def main() -> None:
         "view_module.stl": mock_module(p),
         "elp_16mp_case.step": cq.Assembly().add(base, name="base").add(lid, name="lid").toCompound(),
     }
+    if p.closure == "snap":
+        c_base, c_lid = build_coupon(p, base, lid)
+        exports["elp_16mp_coupon_base.stl"] = c_base
+        exports["elp_16mp_coupon_lid.stl"] = flip_lid(c_lid)
     for name, shape in exports.items():
         path = os.path.join(args.out, name)
         if name.endswith(".stl"):

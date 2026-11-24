@@ -198,6 +198,11 @@ def views(p: case.Params) -> Dict[str, Callable[[str], None]]:
     module = case.mock_module(p).val()
     hook_cable_end = p.hooks()[1]
     asm = [Layer("base", base), Layer("lid", lid), Layer("module", module)]
+    c_base, c_lid = case.build_coupon(p, case.build_base(p), case.build_lid(p))
+    coupon_base_print = c_base.val()
+    # Same flip as the STL export, then park the lid beside the base on the bed
+    coupon_lid_print = (c_lid.translate((0, 0, -(p.base_h + p.lid_t))).rotate((0, 0, 0), (1, 0, 0), 180)
+                        .translate((0, p.out_w + 6, 0)).val())
     return {
         "base_iso": lambda out: render_iso([Layer("base", base)], "Base, as printed (upright)", out),
         "lid_iso": lambda out: render_iso([Layer("lid", lid)], "Lid, assembled orientation (hooks down)",
@@ -210,6 +215,10 @@ def views(p: case.Params) -> Dict[str, Callable[[str], None]]:
         # Cable-end hook: pocket, release window, barb engagement
         "section_hook": lambda out: render_section(
             asm, "y", hook_cable_end["y"], "Snap hooks: pocket, window, barb", out),
+        # Snap coupon in print orientation: base upright, lid outer face down, side by side
+        "coupon_print_iso": lambda out: render_iso(
+            [Layer("base", coupon_base_print), Layer("lid", coupon_lid_print)],
+            "Snap test coupon, as printed (both on the bed, no supports)", out),
         # Through the lens: rails, PCB seat, cone window
         "section_lens": lambda out: render_section(
             asm, "x", p.lens_x, "Lens: rails, PCB seat, FOV cone", out),
