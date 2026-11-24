@@ -52,3 +52,7 @@ python3 cad/elp_16mp_case.py --out out --log-level DEBUG
 
 - [ ] Tilt mount for the U1 top cover (pivot with 5° detents, or a fixed wedge)
 - [ ] Update `lens_x`/`lens_y`/connector parameters from caliper measurements
+
+## Handing off to Claude Code
+
+`CLAUDE.md` has the full design context and conventions. `HANDOFF_PROMPT.md` is the prompt to start a session with.
