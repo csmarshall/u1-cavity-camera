@@ -107,6 +107,14 @@ class Params:
     nozzle_ridges: int = 3       # number of barbs
     ridge_pitch: float = 3.0     # barb spacing
     nozzle_flat: float = 0.4     # flattening of the bottom so it sits on the bed
+    # Closed cable path: the base keeps only the lower half of the nozzle, a
+    # separate cap (printed split face down) is the upper half, and a tongue on
+    # the lid fills the end-wall slot above the bore. Heat shrink clamps base
+    # half + cap into one round ridged tube. A tongue on the cap itself would
+    # hang unsupported in print, so the end-wall closure belongs to the lid.
+    cable_cap: bool = True
+    cap_fit: float = 0.15        # side clearance of the lid tongue in the end-wall slot
+    cable_clear: float = 0.15    # radial clearance between the cable and the bore (cable OD = cable_w - 2x this)
     stop_l: float = 1.0          # length of the board stop nubs at the bay boundary
     stop_w: float = 1.0          # width of each nub (PCB edge zone only)
     cable_x: float = 26.0        # side-slot centre along X
@@ -191,6 +199,9 @@ class Params:
     def cable_z(self):
         """Cable axis height through the end wall (nozzle axis), else None."""
         return self.nozzle_r - self.nozzle_flat if self.use_nozzle else None
+
+    @property
+    def use_cap(self): return self.use_nozzle and self.cable_cap
 
     @property
     def nozzle_l(self): return self.nozzle_collar_l + self.nozzle_ridges * self.ridge_pitch + 0.5
@@ -357,6 +368,37 @@ def build_nozzle(p: Params) -> cq.Workplane:
     return body.intersect(_box(p.out_x1 - 1, p.out_x1 + p.nozzle_l + 1, -50, 50, 0, 50))
 
 
+def _cable_bore(p: Params, x0: float, r: float) -> cq.Workplane:
+    """Cylinder on the cable axis from x0 to past the nozzle tip."""
+    x_end = p.out_x1 + p.nozzle_l + 0.1
+    return cq.Workplane().add(cq.Solid.makeCylinder(r, x_end - x0, pnt=cq.Vector(x0, p.cable_y, p.cable_z),
+                                                    dir=cq.Vector(1, 0, 0)))
+
+
+def build_cable_cap(p: Params) -> cq.Workplane:
+    """Upper half of the ridged nozzle, outside the end face, with the bore groove underneath."""
+    x_end = p.out_x1 + p.nozzle_l + 0.1
+    cap = build_nozzle(p).intersect(_box(p.out_x1, x_end + 1, -50, 50, p.cable_z, 50))
+    cap = cap.cut(_cable_bore(p, p.out_x1 - 1, p.cable_w / 2))
+    log.debug("Cable cap: x %.2f..%.2f, z %.2f..%.2f", p.out_x1, p.out_x1 + p.nozzle_l - 0.2,
+              p.cable_z, p.cable_z + p.nozzle_r)
+    return cap
+
+
+def build_lid_tongue(p: Params) -> cq.Workplane:
+    """Bar hanging from the lid into the end-wall slot, flat bottom on top of the bore circle."""
+    r_b = p.cable_w / 2
+    z_bot = p.cable_z + r_b
+    half = r_b - p.cap_fit
+    log.debug("Lid tongue: y %.2f +/- %.2f, z %.2f..%.2f", p.cable_y, half, z_bot, p.base_h)
+    return _box(p.cav_x1, p.out_x1, p.cable_y - half, p.cable_y + half, z_bot, p.base_h)
+
+
+def mock_cable(p: Params) -> cq.Workplane:
+    """Cable stand-in along the bore, cable_clear smaller in radius than the bore."""
+    return _cable_bore(p, p.cav_x1 - 0.1, p.cable_w / 2 - p.cable_clear)
+
+
 def build_base(p: Params) -> cq.Workplane:
     """Tray: PCB drops in lens-up and rests on two side rails."""
     log.info("Building base: %.1f x %.1f x %.1f mm, cable=%s, closure=%s",
@@ -389,8 +431,11 @@ def build_base(p: Params) -> cq.Workplane:
             # Open-top slot above the bore so the cable lays in from above
             base = base.cut(_box(p.cav_x1 - 0.1, x_end, p.cable_y - r_b, p.cable_y + r_b,
                                  p.cable_z, p.base_h + 1))
-            log.debug("Nozzle: axis z=%.2f, peak r=%.2f, valley r=%.2f, length %.1f",
-                      p.cable_z, p.nozzle_r, p.nozzle_valley_r, p.nozzle_l)
+            if p.use_cap:
+                # Upper half of the nozzle belongs to the cap
+                base = base.cut(_box(p.out_x1, x_end + 1, -50, 50, p.cable_z, p.base_h + 1))
+            log.debug("Nozzle: axis z=%.2f, peak r=%.2f, valley r=%.2f, length %.1f, cap=%s",
+                      p.cable_z, p.nozzle_r, p.nozzle_valley_r, p.nozzle_l, p.use_cap)
         else:
             base = base.cut(_box(p.cav_x1 - 0.1, p.out_x1 + 0.1,
                                  p.cable_y - p.cable_w / 2, p.cable_y + p.cable_w / 2,
@@ -459,6 +504,9 @@ def build_lid(p: Params) -> cq.Workplane:
             lid = lid.union(_hook(p, h))
         log.debug("Added %d snap hooks", len(p.hooks()))
 
+    if p.use_cap:
+        lid = lid.union(build_lid_tongue(p))
+
     rib_h = z0 - p.z_pcb_top - p.rib_preload
     key_gap = 0.15
     for x in p.rib_xs:
@@ -498,8 +546,9 @@ def build_size_mockup(p: Params) -> cq.Workplane:
                                      pnt=cq.Vector(p.out_x1 - 0.2, p.cable_y, p.cable_z),
                                      dir=cq.Vector(1, 0, 0))
         body = body.cut(cq.Workplane().add(bore))
-        body = body.cut(_box(p.out_x1 - 0.2, x_end, p.cable_y - r_b, p.cable_y + r_b,
-                             p.cable_z, p.base_h + 1))
+        if not p.use_cap:
+            body = body.cut(_box(p.out_x1 - 0.2, x_end, p.cable_y - r_b, p.cable_y + r_b,
+                                 p.cable_z, p.base_h + 1))
     # Lens window cone, same as the lid, so the opening reads true
     d_in, d_out = p.window_d_at(p.front_gap), p.window_d_at(p.front_gap + p.lid_t)
     slope = (d_out - d_in) / 2 / p.lid_t
@@ -571,8 +620,24 @@ def self_check(p: Params, base: cq.Workplane, lid: cq.Workplane) -> None:
     checks = {"base vs lid": base.intersect(lid),
               "base vs module": base.intersect(module),
               "lid vs module": lid.intersect(module)}
+    if p.use_cap:
+        cap, cable = build_cable_cap(p), mock_cable(p)
+        checks.update({"base vs cap": base.intersect(cap), "lid vs cap": lid.intersect(cap),
+                       "cable vs base": cable.intersect(base), "cable vs lid": cable.intersect(lid),
+                       "cable vs cap": cable.intersect(cap)})
+        if len(cap.solids().vals()) != 1 or not cap.val().isValid():
+            raise RuntimeError("cable cap is not a single valid solid")
+        # Outside the end face, base half + cap must rebuild the whole ridged nozzle
+        # (minus the bore), or the heat shrink has a gap to fall into
+        x_end = p.out_x1 + p.nozzle_l + 1
+        zone = _box(p.out_x1, x_end, -50, 50, -1, 50)
+        want = build_nozzle(p).cut(_cable_bore(p, p.out_x1 - 1, p.cable_w / 2)).intersect(zone).val().Volume()
+        got = base.intersect(zone).val().Volume() + cap.val().Volume()
+        log.debug("Nozzle outside end face: base half + cap = %.2f mm^3, full nozzle = %.2f mm^3", got, want)
+        if abs(got - want) > 0.01 * want:
+            raise RuntimeError(f"base half + cap ({got:.1f} mm^3) do not rebuild the nozzle ({want:.1f} mm^3)")
     for name, solid in checks.items():
-        vol = solid.val().Volume() if solid.vals() else 0.0
+        vol = sum(s.Volume() for s in solid.solids().vals())
         log.debug("Interference %s: %.4f mm^3", name, vol)
         if vol > 1e-6:
             raise RuntimeError(f"Interference detected ({name}): {vol:.3f} mm^3")
@@ -585,7 +650,10 @@ def self_check(p: Params, base: cq.Workplane, lid: cq.Workplane) -> None:
     mockup = build_size_mockup(p)
     if len(mockup.solids().vals()) != 1 or not mockup.val().isValid():
         raise RuntimeError("size mockup is not a single valid solid")
-    bb_asm = base.union(lid).val().BoundingBox()
+    asm = base.union(lid)
+    if p.use_cap:
+        asm = asm.union(build_cable_cap(p))
+    bb_asm = asm.val().BoundingBox()
     bb_mock = mockup.val().BoundingBox()
     for axis in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"):
         delta = abs(getattr(bb_asm, axis) - getattr(bb_mock, axis))
@@ -650,10 +718,16 @@ def main() -> None:
         "elp_16mp_case.step": cq.Assembly().add(base, name="base").add(lid, name="lid").toCompound(),
     }
     exports["elp_16mp_size_mockup.stl"] = build_size_mockup(p)
+    if p.use_cap:
+        cap = build_cable_cap(p)
+        # Split face (with the bore groove) down on the bed
+        exports["elp_16mp_cable_cap.stl"] = cap.translate((0, 0, -p.cable_z))
     # Iteration STEP: named, coloured bodies in assembled position, case coordinates
     iteration = (cq.Assembly(name="elp_16mp_iteration")
                  .add(base, name="case_base", color=cq.Color(0.31, 0.49, 0.67))
                  .add(lid, name="case_lid", color=cq.Color(0.85, 0.55, 0.23))
+                 .add(build_cable_cap(p) if p.use_cap else cq.Workplane(), name="case_cable_cap",
+                      color=cq.Color(0.85, 0.75, 0.35))
                  .add(mock_module(p), name="ref_camera_mock", color=cq.Color(0.24, 0.60, 0.37))
                  .add(build_size_mockup(p).translate((0, -40, 0)), name="ref_size_mockup_offset_-40y",
                       color=cq.Color(0.69, 0.37, 0.63))

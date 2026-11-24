@@ -42,7 +42,8 @@ MESH_TOL = 0.05              # tessellation tolerance, mm
 FIG_W_IN, FIG_DPI = 12.0, 130
 ISO_ELEV, ISO_AZIM = 28.0, -60.0   # camera above, in front of the -Y face, +X end to the right
 ISO_PX_W, ISO_PX_H = 1600, 900
-PART_COLOURS = {"base": "#4f81bd", "lid": "#e0a040", "module": "#59a14f", "mount": "#b05fa0"}
+PART_COLOURS = {"base": "#4f81bd", "lid": "#e0a040", "module": "#59a14f", "mount": "#b05fa0",
+                "cable": "#222222"}
 
 
 @dataclass
@@ -197,7 +198,11 @@ def views(p: case.Params) -> Dict[str, Callable[[str], None]]:
     base, lid = case.build_base(p).val(), case.build_lid(p).val()
     module = case.mock_module(p).val()
     hook_cable_end = p.hooks()[1]
-    asm = [Layer("base", base), Layer("lid", lid), Layer("module", module)]
+    cap = case.build_cable_cap(p).val() if p.use_cap else None
+    cable = case.mock_cable(p).val()
+    asm = [Layer("base", base), Layer("lid", lid), Layer("module", module)] + \
+        ([Layer("mount", cap)] if cap is not None else [])
+    cable_layers = asm + [Layer("cable", cable)]
     c_base, c_lid = case.build_coupon(p, case.build_base(p), case.build_lid(p))
     coupon_base_print = c_base.val()
     # Same flip as the STL export, then park the lid beside the base on the bed
@@ -211,7 +216,12 @@ def views(p: case.Params) -> Dict[str, Callable[[str], None]]:
                                                "Assembly", out),
         # Cable axis: bore, open-top slot, nozzle ridges, bay, stop nubs
         "section_cable_axis": lambda out: render_section(
-            asm, "y", p.cable_y, "Cable axis: bore, slot, heat-shrink nozzle", out),
+            cable_layers, "y", p.cable_y, "Cable axis: bore, lid tongue, nozzle (base half + cap), cable", out),
+        "section_nozzle_end": lambda out: render_section(
+            cable_layers, "x", p.out_x1 + p.nozzle_collar_l / 2, "Nozzle collar: base half + cap around the cable", out),
+        "cable_end_iso": lambda out: render_iso(
+            [Layer("base", base), Layer("lid", lid, 0.5)] + ([Layer("mount", cap)] if cap is not None else []),
+            "Cable end: lid tongue in the end-wall slot, cap on the nozzle", out, elev=30, azim=-35),
         # Cable-end hook: pocket, release window, barb engagement
         "section_hook": lambda out: render_section(
             asm, "y", hook_cable_end["y"], "Snap hooks: pocket, window, barb", out),

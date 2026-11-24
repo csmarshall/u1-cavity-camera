@@ -13,6 +13,7 @@ The camera is a 62.3 × 9 × 5.5 mm strip board with a Sony IMX298 sensor and a 
 | `stl/elp_16mp_lid.stl` | Lid, already flipped for printing. |
 | `stl/elp_16mp_*_screw.stl` | Same case closed with 2× M2 countersunk screws instead of snap hooks. |
 | `stl/elp_16mp_coupon_{base,lid}.stl` | Snap test coupon: the -X end of the case (12 mm slice) to test the hook click and release before a full print. |
+| `stl/elp_16mp_cable_cap.stl` | Top half of the cable nozzle. Print it split face down. Lay the cable in the base half, put the cap on, close the lid (its tongue closes the end-wall slot), then shrink the tubing over the whole nozzle. |
 | `stl/elp_16mp_size_mockup.stl` | Solid block with the assembled case's outside shape, nozzle and lens window included, plus a crosshair on the lens axis. Print it to find a mount spot inside the printer. |
 | `step/elp_16mp_case.step` | Assembled base + lid (snap version) for CAD. |
 | `step/elp_16mp_iteration.step` | For positioning the camera in your own CAD. Named bodies: `case_base`, `case_lid`, `ref_camera_mock`, `ref_size_mockup_offset_-40y`, and two 450 mm field-of-view pyramids (`ref_fov_stream_16x9` at 97 × 65°, `ref_fov_sensor_4x3` at 97 × 81°). Units are mm. The origin is the board centre, Z = 0 is the outside of the base floor, the lens faces +Z, X is the board length, and the cable nozzle is at +X. The sensor's long axis is assumed to run along X. |
@@ -23,7 +24,7 @@ The camera is a 62.3 × 9 × 5.5 mm strip board with a Sony IMX298 sensor and a 
 - **Fit**: board drops in lens-up onto two side rails, 0.3 mm clearance per side. Ribs on the lid press the board edges down.
 - **Lens window**: a cone in the lid sized from the lens's ~109° diagonal FOV so the lid never vignettes the image.
 - **Closure**: one cantilever snap hook at each end of the lid (0.5 mm catch, ~1.9% strain). To open, push each barb in through its window in the end face and lift. Set `closure="screw"` for the screw version (M2 × 6 or × 8 countersunk flat head into 1.7 mm pilots).
-- **Cable**: exits the short end through a cable bay (so the 4-pin plug can turn) and a ridged C-channel nozzle. Lay the cable in the channel, then shrink tubing over the nozzle and cable. The barbs' sheer faces point at the case so the tubing can't slide off. Set `cable_exit="side"` for a long-side slot instead.
+- **Cable**: exits the short end through a cable bay (so the 4-pin plug can turn) and a ridged nozzle that is enclosed all round. The base holds the lower half, a separate cap is the upper half, and a tongue on the lid closes the end-wall slot above the cable. Shrink tubing over the nozzle clamps the halves together. The barbs' sheer faces point at the case so the tubing can't slide off. Set `cable_exit="side"` for a long-side slot instead.
 - **Self-check**: the script fails if parts collide with each other or with a stand-in for the camera, if a part isn't a single valid solid, or if walls or webs get thinner than 0.8 mm.
 
 Assembled size: 81.9 × 13.2 × 11.6 mm, 92 mm long including the nozzle.
