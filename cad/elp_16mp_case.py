@@ -722,6 +722,8 @@ def main() -> None:
         cap = build_cable_cap(p)
         # Split face (with the bore groove) down on the bed
         exports["elp_16mp_cable_cap.stl"] = cap.translate((0, 0, -p.cable_z))
+        # Viewer shows the cap in place with the base (both are fitted before the lid)
+        exports["view_base.stl"] = cq.Workplane().add(cq.Compound.makeCompound([base.val(), cap.val()]))
     # Iteration STEP: named, coloured bodies in assembled position, case coordinates
     iteration = (cq.Assembly(name="elp_16mp_iteration")
                  .add(base, name="case_base", color=cq.Color(0.31, 0.49, 0.67))

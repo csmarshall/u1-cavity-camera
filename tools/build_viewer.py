@@ -49,8 +49,13 @@ def main() -> None:
 
     with open(args.viewer) as f:
         html = f.read()
+    # Base as displayed: base + cable cap when the case script wrote it, else the printable base
+    base_stl = os.path.join(args.stl_dir, "view_base.stl")
+    if not os.path.exists(base_stl):
+        base_stl = os.path.join(args.stl_dir, "elp_16mp_base.stl")
+    log.info("Viewer base mesh: %s", base_stl)
     data = 'const DATA={base:"%s",lid:"%s",mod:"%s"};' % (
-        b64(os.path.join(args.stl_dir, "elp_16mp_base.stl")),
+        b64(base_stl),
         b64(os.path.join(args.stl_dir, "view_lid.stl")),
         b64(os.path.join(args.stl_dir, "view_module.stl")))
     html, n = re.subn(r"const DATA=\{.*?\};", lambda _: data, html, count=1, flags=re.S)
