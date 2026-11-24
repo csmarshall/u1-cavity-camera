@@ -525,6 +525,46 @@ def main() -> None:
         write_viewer(kit, by_drop, plate, cradle, args.out)
 
 
+def explorer_block(kit: Kit, names: Dict[str, str]) -> dict:
+    """
+    Data for the viewer's "Pose explorer": the case->world matrix at tilt 0 with the hinge
+    axis on the lip face (axis_Y = 0, drop 0), plus the world point of that axis. The viewer poses
+        world = Translate(0, dy, dz) * R_x(-a about axis) * m0_0
+    which is asserted here against the real pose, fm._case_to_world, for several (a, axis_Y, drop).
+    A positive drop hangs the camera lower, so dz = -drop (the mount frame is flipped for "below").
+    """
+    g = kit.g
+    kit.set_drop(0.0)
+    g.axis_Y = 0.0
+    m0 = fm._case_to_world(g, 0.0)
+    axis = g.to_world(cq.Workplane().add(cq.Vertex.makeVertex(0, g.axis_Y, g.axis_Z))).val().toTuple()
+    for a, ay, drop in ((20.0, 0.0, 0.0), (45.0, 33.0, 0.0), (60.0, 12.5, 7.0), (85.0, 40.0, 15.0)):
+        kit.set_drop(drop)
+        g.axis_Y = ay
+        want = fm._case_to_world(g, a)
+        trans = [1, 0, 0, 0, 0, 1, 0, ay, 0, 0, 1, -drop, 0, 0, 0, 1]
+        got = fm._matmul(trans, fm._matmul(fm._rot_x_about(axis, -a), m0))
+        err = max(abs(x - y) for x, y in zip(want, got))
+        log.debug("Explorer formula at a=%.0f axis_Y=%.1f drop=%.1f: max error %.2e", a, ay, drop, err)
+        if err > 1e-6:
+            raise RuntimeError(f"explorer pose formula disagrees with the CAD pose at a={a}, axis_Y={ay}, drop={drop}")
+    kit.set_drop(0.0)
+    g.axis_Y = 0.0
+    mp, kp = kit.mp, kit.kp
+    tips = {}
+    for vname, v in kit.variants.items():
+        tip = v.place_exit(cq.Workplane().add(cq.Vertex.makeVertex(v.nozzle_l, 0, v.cable_z))).val().toTuple()
+        tips[vname.replace("+", "p").replace("-", "m")] = list(tip)
+    w = g.wall_out
+    return {"m0": m0, "axis": list(axis), "cradle_x0": g.cradle_x0, "cradle_x1": g.cradle_x1,
+            "floor_bot": g.floor_bot, "pad_x": kp.pad_w, "pad_y": 2 * w,
+            "plate_t": mp.plate_t, "face_x": w,
+            "face_z": [kit.rail_c - kit.rail_top_w / 2 - 2.0, kit.rail_c + kit.rail_top_w / 2 + 2.0],
+            "slab": {"x": g.plate_x1, "y": mp.plate_t + kp.rail_h, "z": mp.plate_h},
+            "nozzle_tips": tips, "plate": names["plate"], "cradle": names["cradle"],
+            "slope": kp.below_slope_deg, "gap": kp.below_gap, "toolhead": [kp.toolhead_dy - kp.toolhead_margin, kp.toolhead_dz - kp.toolhead_margin]}
+
+
 def write_viewer(kit: Kit, by_drop, plate, cradle, out: str) -> None:
     """
     Viewer data: shared meshes (plate, cradle, 3 case variants) plus one wedge
@@ -577,6 +617,7 @@ def write_viewer(kit: Kit, by_drop, plate, cradle, out: str) -> None:
                     "upside_down": rot == 180, "slope": kit.kp.below_slope_deg, "gap": kit.kp.below_gap,
                     "toolhead": [kit.kp.toolhead_dy, kit.kp.toolhead_dz],
                     "plate_h": kit.mp.plate_h, "axis_from_wall": placements[a]}
+    configs["_explorer"] = explorer_block(kit, names)
     with open(os.path.join(out, "viewer_kit.json"), "w") as f:
         json.dump({"files": sorted(set(names.values())), "configs": configs}, f, indent=1)
     log.info("Wrote viewer kit data: %d configs, %d meshes", len(configs), len(names))
