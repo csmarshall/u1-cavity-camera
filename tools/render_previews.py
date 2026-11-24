@@ -35,6 +35,7 @@ import vtk  # noqa: E402  (ships with cadquery)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cad"))
 import elp_16mp_case as case  # noqa: E402
+import u1_front_mount as mount  # noqa: E402
 
 log = logging.getLogger("render_previews")
 
@@ -43,7 +44,7 @@ FIG_W_IN, FIG_DPI = 12.0, 130
 ISO_ELEV, ISO_AZIM = 28.0, -60.0   # camera above, in front of the -Y face, +X end to the right
 ISO_PX_W, ISO_PX_H = 1600, 900
 PART_COLOURS = {"base": "#4f81bd", "lid": "#e0a040", "module": "#59a14f", "mount": "#b05fa0",
-                "cable": "#222222"}
+                "cable": "#222222", "cradle": "#8a8a8a", "fov": "#e04b4b"}
 
 
 @dataclass
@@ -208,7 +209,61 @@ def views(p: case.Params) -> Dict[str, Callable[[str], None]]:
     # Same flip as the STL export, then park the lid beside the base on the bed
     coupon_lid_print = (c_lid.translate((0, 0, -(p.base_h + p.lid_t))).rotate((0, 0, 0), (1, 0, 0), 180)
                         .translate((0, p.out_w + 6, 0)).val())
+    g = mount.Geometry(p, mount.MountParams())
+    plate_w, cradle_c = mount.build_plate(g).val(), mount.build_cradle(g)
+    case_parts = [base, lid] + ([cap] if cap is not None else [])
+
+    def mount_layers(tilt: float, with_fov: bool = False) -> list:
+        """Plate fixed; cradle and case posed at `tilt` degrees down."""
+        layers = [Layer("mount", plate_w), Layer("cradle", g.pose(cradle_c, tilt).val())]
+        names = ["base", "lid", "base"]
+        for name, part in zip(names, case_parts):
+            layers.append(Layer(name, g.pose(cq.Workplane().add(part), tilt).val()))
+        if with_fov:
+            fov = case.build_fov_pyramid(p, p.stream_aspect_w, p.stream_aspect_h)
+            layers.append(Layer("fov", g.pose(fov, tilt).val(), 0.2))
+        return layers
+
+    knuckle_x = sum(g.knuckle_spans()["cradle"][1]) / 2
+    gb = mount.Geometry(p, mount.MountParams(mount_side="below"))
+    plate_b, cradle_b = mount.build_plate(gb), mount.build_cradle(gb)
+
+    def below_layers(tilt: float) -> list:
+        """Below mode in the world frame: plate flipped, camera hanging under it."""
+        layers = [Layer("mount", gb.to_world(plate_b).val()),
+                  Layer("cradle", gb.to_world(gb.pose(cradle_b, tilt)).val())]
+        for name, part in zip(["base", "lid", "base"], case_parts):
+            layers.append(Layer(name, gb.to_world(gb.pose(cq.Workplane().add(part), tilt)).val()))
+        return layers
+
+    # "below" world = mount frame turned 180 deg about Y, which mirrors X
+    knuckle_xb = -sum(gb.knuckle_spans()["cradle"][1]) / 2
+    wedge_print = mount.print_orient_plate(mount.build_wedge_mount(g, 45.0)).val()
     return {
+        "mount_iso_45": lambda out: render_iso(
+            mount_layers(45.0), "Front mount at 45 deg down: wall plate (wall at Y=0), cradle, case", out,
+            elev=20, azim=-50),
+        "mount_section_0": lambda out: render_section(
+            mount_layers(0.0), "x", knuckle_x, "Front mount, tilt 0: hinge through a cradle knuckle (wall at Y=0)", out),
+        "mount_section_45": lambda out: render_section(
+            mount_layers(45.0), "x", knuckle_x, "Front mount, tilt 45 deg down (wall at Y=0)", out),
+        "mount_section_75": lambda out: render_section(
+            mount_layers(75.0), "x", knuckle_x, "Front mount, tilt 75 deg (end of checked range)", out),
+        "mount_below_iso_45": lambda out: render_iso(
+            below_layers(45.0), "Below mode at 45 deg down: plate on the feature, end hinge, camera hanging under it",
+            out, elev=15, azim=125),
+        "mount_below_section_0": lambda out: render_section(
+            below_layers(0.0), "x", knuckle_xb, "Below mode, tilt 0 (wall at Y=0, plate Z 0..22)", out),
+        "mount_below_section_45": lambda out: render_section(
+            below_layers(45.0), "x", knuckle_xb, "Below mode, tilt 45 deg down", out),
+        "mount_below_section_75": lambda out: render_section(
+            below_layers(75.0), "x", knuckle_xb, "Below mode, tilt 75 deg (end of checked range)", out),
+        "mount_print_layout": lambda out: render_iso(
+            [Layer("mount", mount.print_orient_plate(mount.build_plate(g)).val()),
+             Layer("cradle", mount.print_orient_cradle(g, cradle_c).translate((0, 30, 0)).val()),
+             Layer("base", cq.Workplane().add(wedge_print).translate((0, 75, 0)).val())],
+            "As printed, no supports: wall plate (back down), cradle (floor down), 45 deg wedge (back down)", out,
+            elev=35, azim=-60),
         "base_iso": lambda out: render_iso([Layer("base", base)], "Base, as printed (upright)", out),
         "lid_iso": lambda out: render_iso([Layer("lid", lid)], "Lid, assembled orientation (hooks down)",
                                           out, elev=-25),

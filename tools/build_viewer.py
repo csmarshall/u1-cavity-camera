@@ -67,6 +67,23 @@ def main() -> None:
     if n != 1:
         raise SystemExit("GEOM block not found in viewer; refusing to write")
     log.debug("Embedded %s", geom)
+    # Mount configurations (written by cad/u1_front_mount.py --viewer): meshes + transforms
+    mounts_json = os.path.join(args.stl_dir, "viewer_mounts.json")
+    mounts = {}
+    if os.path.exists(mounts_json):
+        with open(mounts_json) as f:
+            meta = json.load(f)
+        for key, m in meta.items():
+            entry = {k: v for k, v in m.items() if k != "files"}
+            entry["fixed"] = b64(os.path.join(args.stl_dir, m["files"]["fixed"]))
+            if "cradle" in m["files"]:
+                entry["cradle"] = b64(os.path.join(args.stl_dir, m["files"]["cradle"]))
+            mounts[key] = entry
+    mounts_js = "const MOUNTS=%s;" % json.dumps(mounts, separators=(",", ":"))
+    html, n = re.subn(r"const MOUNTS=\{.*?\};", lambda _: mounts_js, html, count=1, flags=re.S)
+    if n != 1:
+        raise SystemExit("MOUNTS block not found in viewer; refusing to write")
+    log.info("Embedded %d mount configurations", len(mounts))
     pngs = sorted(glob.glob(os.path.join(args.renders_dir, "*.png")))
     renders = "const RENDERS=%s;" % json.dumps(
         [[os.path.splitext(os.path.basename(f))[0], b64(f)] for f in pngs], separators=(",", ":"))
