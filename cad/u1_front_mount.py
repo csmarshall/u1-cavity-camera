@@ -606,10 +606,20 @@ VIEWER_CONFIGS = [
     ("landscape_above", "Hinge: landscape, camera above the feature", {}, None, {}),
     ("landscape_below", "Hinge: landscape, camera below the feature (end hinge)", {"mount_side": "below"}, None, {}),
     ("portrait_above", "Hinge: portrait 9:16, above, cable out the top end", {"orientation": "portrait"}, None, {}),
-    ("portrait_above_sideA", "Hinge: portrait 9:16, above, cable out side A (case +Y)", {"orientation": "portrait"},
+    ("portrait_above_sideA", "Hinge: portrait, cable corner A (top, case +Y), hinge -X end", {"orientation": "portrait"},
      None, {"cable_exit": "side_end", "cable_side": 1}),
-    ("portrait_above_sideB", "Hinge: portrait 9:16, above, cable out side B (case -Y)", {"orientation": "portrait"},
+    ("portrait_above_sideB", "Hinge: portrait, cable corner B (bottom, case -Y), hinge -X end", {"orientation": "portrait"},
      None, {"cable_exit": "side_end", "cable_side": -1}),
+    ("portrait_above_sideC", "Hinge: portrait, cable corner C (top, case +Y), hinge +X end (flip H+V in Mainsail)",
+     {"orientation": "portrait", "hinge_end": 1}, None, {"cable_exit": "side_end", "cable_side": 1}),
+    ("portrait_above_sideD", "Hinge: portrait, cable corner D (bottom, case -Y), hinge +X end (flip H+V in Mainsail)",
+     {"orientation": "portrait", "hinge_end": 1}, None, {"cable_exit": "side_end", "cable_side": -1}),
+    ("below_slope20_t45", "EXAMPLE: below the lip, cover sloped 20 deg (slope not yet measured), tilt to 45",
+     {"mount_side": "below", "below_slope_deg": 20.0, "tilt_max": 45.0}, None, {}),
+    ("below_slope35_t45", "EXAMPLE: below the lip, cover sloped 35 deg (slope not yet measured), tilt to 45",
+     {"mount_side": "below", "below_slope_deg": 35.0, "tilt_max": 45.0}, None, {}),
+    ("below_slope35_t60", "EXAMPLE: below the lip, cover sloped 35 deg (slope not yet measured), tilt to 60",
+     {"mount_side": "below", "below_slope_deg": 35.0, "tilt_max": 60.0}, None, {}),
     ("wedge_above_45", "Wedge 45 deg: landscape, above", {}, 45.0, {}),
     ("wedge_below_45", "Wedge 45 deg: landscape, below", {"mount_side": "below"}, 45.0, {}),
 ]
@@ -684,7 +694,8 @@ def write_viewer_configs(out_dir: str) -> None:
         meta[key] = {"label": label, "files": files, "m0": m0, "axis": list(axis),
                      "tilt": wedge_angle if wedge_angle is not None else 45.0,
                      "fixed_tilt": wedge_angle is not None, "plate_h": g.mp.plate_h,
-                     "axis_from_wall": g.axis_Y}
+                     "axis_from_wall": g.axis_Y, "tilt_max": g.mp.tilt_max,
+                     "below_slope_deg": g.mp.below_slope_deg}
         log.info("Viewer config %s: axis at %s, %s", key, tuple(round(v, 2) for v in axis), files)
     with open(os.path.join(out_dir, "viewer_mounts.json"), "w") as f:
         json.dump(meta, f, indent=1)
