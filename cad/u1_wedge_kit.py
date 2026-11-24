@@ -56,6 +56,8 @@ class KitParams:
     toolhead_dy: float = 10.0        # E: lip inner face to the toolhead front, same position
     rib_spacing: float = 57.0        # F: rib spacing on the lip's inner face; the plate fits between two ribs
     toolhead_margin: float = 2.0     # extra keep-out around the toolhead
+    window_z: float = 40.0           # lip bottom edge up to the removable window's bottom edge (Charles, 2026-11-24)
+    window_margin: float = 2.0       # nothing may come closer than this to the window line
     rib_clear: float = 1.0           # plate clearance to each rib
     # How much lower the camera hangs (its top end below the lip's bottom edge lets it
     # tuck back into the gap; costs depth). The viewer compares several.
@@ -269,13 +271,18 @@ class Kit:
         kp = self.kp
         return _box(-500, 500, kp.toolhead_dy - kp.toolhead_margin, 500, -500, -kp.toolhead_dz + kp.toolhead_margin)
 
+    def window(self) -> cq.Workplane:
+        """Keep-out (world) behind the lip from the removable window's bottom edge up: Charles doesn't want the camera in it."""
+        kp = self.kp
+        return _box(-500, 500, 0, 500, kp.window_z - kp.window_margin, 500)
+
     def place(self, angle: float, parts: List[cq.Workplane]) -> float:
         """Smallest hinge-reference distance from the wall that clears plate, rail and cover at `angle`."""
         kp, g = self.kp, self.g
         obstacles = (_box(-500, 500, -1, self.mp.plate_t + kp.rail_h + kp.lip_gap, 0, self.mp.plate_h)
                      .union(g.cover()))
         world = lambda w: g.to_world(w)  # noqa: E731
-        cover_w = world(obstacles).union(self.toolhead())
+        cover_w = world(obstacles).union(self.toolhead()).union(self.window())
 
         def clear(ay: float) -> bool:
             g.axis_Y = ay
@@ -459,6 +466,11 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
                 raise RuntimeError(f"{a:.0f} deg: the camera or cradle reaches the toolhead keep-out")
         if _ivol(wedge, th) > 1e-3:
             raise RuntimeError(f"{a:.0f} deg wedge reaches the toolhead keep-out")
+        win = kit.window()
+        for part in [wedge, kit.posed(cradle, a)] + [kit.posed(p, a) for p in kit.moving_parts()[1:]]:
+            if _ivol(part, win) > 1e-3:
+                raise RuntimeError(f"{a:.0f} deg: the camera, cradle or wedge reaches into the window "
+                                   f"(above {kp.window_z - kp.window_margin:.0f} mm over the lip edge)")
         if _ivol(wedge, cover_w) > 1e-3 or _ivol(wedge, plate_body) > 1e-3:
             raise RuntimeError(f"{a:.0f} deg wedge runs into the cover or plate")
         if _ivol(wedge, plate) > 1e-3:
@@ -497,7 +509,7 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
         log.debug("Overhang %s: %.1f mm^2 (allowed %.0f)", name, area, allowed)
         if area > allowed:
             raise RuntimeError(f"{name}: {area:.0f} mm^2 of >45 deg overhang")
-    log.info("Kit self-check passed: %d wedges, cradle fits 3 cases x 2 ways, cover clear, printable",
+    log.info("Kit self-check passed: %d wedges, cradle fits 3 cases x 2 ways, cover, toolhead and window clear, printable",
              len(wedges))
 
 
@@ -631,7 +643,8 @@ def explorer_block(kit: Kit, names: Dict[str, str]) -> dict:
             "face_z": [kit.rail_c - kit.rail_top_w / 2 - 2.0, kit.rail_c + kit.rail_top_w / 2 + 2.0],
             "slab": {"x": g.plate_x1, "y": mp.plate_t + kp.rail_h, "z": mp.plate_h},
             "nozzle_tips": tips, "plate": names["plate"], "cradle": names["cradle"],
-            "slope": kp.below_slope_deg, "gap": kp.below_gap, "toolhead": [kp.toolhead_dy - kp.toolhead_margin, kp.toolhead_dz - kp.toolhead_margin]}
+            "slope": kp.below_slope_deg, "gap": kp.below_gap, "toolhead": [kp.toolhead_dy - kp.toolhead_margin, kp.toolhead_dz - kp.toolhead_margin],
+            "window_z": kp.window_z - kp.window_margin}
 
 
 def write_viewer(kit: Kit, by_drop, plate, cradle, out: str) -> None:
