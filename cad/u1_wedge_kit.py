@@ -62,6 +62,11 @@ class KitParams:
     # How much lower the camera hangs (its top end below the lip's bottom edge lets it
     # tuck back into the gap; costs depth). The viewer compares several.
     drop: float = 0.0
+    # Charles's pick in the Pose explorer (2026-11-24): angle_deg, dy_mm, dz_mm (+ up), camera_shift_mm,
+    # and the case variant:turn (side+Y:180 = cable out the X+ Y+ corner). --pose defaults to it and
+    # the viewer's explorer opens on it.
+    chosen_pose: Tuple[float, float, float, float] = (45.0, 17.5, 0.0, 35.3)
+    chosen_case: str = "side+Y:180"
     viewer_drops: Tuple[float, ...] = (0.0,)   # raising/lowering was compared and dropped (Charles: keep position)
     # Dovetail rail on the plate (profile in YZ, running along X)
     rail_base_w: float = 8.0         # width at the plate face (Z)
@@ -638,10 +643,11 @@ def main() -> None:
                     help="open gap behind the lip plane under its bottom edge, mm (ASSUMED until measured)")
     ap.add_argument("--drop", type=float, default=KitParams.drop, help="hang the camera this much lower, mm")
     ap.add_argument("--viewer", action="store_true", help="also write viewer meshes + viewer_kit.json")
-    ap.add_argument("--pose", type=float, nargs=4, metavar=("ANGLE", "DY", "DZ", "SHIFT"),
+    ap.add_argument("--pose", type=float, nargs="*", metavar="N",
                     help="build one wedge for a Pose-explorer export instead of the kit series: angle_deg, "
-                         "dy_mm, dz_mm (+ up), camera_shift_mm. Builds the cradle-free final mount.")
-    ap.add_argument("--case", default="side+Y:180",
+                         "dy_mm, dz_mm (+ up), camera_shift_mm. Builds the cradle-free final mount. "
+                         "Bare --pose uses KitParams.chosen_pose.")
+    ap.add_argument("--case", default=KitParams.chosen_case,
                     help="case variant and turn for --pose, VARIANT:0|180 (default side+Y:180 = cable out the "
                          "top end toward +X, Charles's X+ Y+ corner)")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"),
@@ -653,11 +659,14 @@ def main() -> None:
     log.debug("Kit parameters: %s", asdict(kp))
     kit = Kit(kp)
     plate, cradle = kit.build_plate(), kit.build_cradle()
-    if args.pose:
+    if args.pose is not None:
+        pose = tuple(args.pose) or kp.chosen_pose
+        if len(pose) != 4:
+            raise SystemExit("--pose takes ANGLE DY DZ SHIFT (or nothing, for KitParams.chosen_pose)")
         vname, rot = args.case.rsplit(":", 1)
         if vname not in kit.variants or rot not in ("0", "180"):
             raise SystemExit(f"--case must be one of {list(kit.variants)} with :0 or :180, got {args.case}")
-        build_direct_pose(kit, plate, *args.pose, vname=vname, rot=int(rot), out=args.out)
+        build_direct_pose(kit, plate, *pose, vname=vname, rot=int(rot), out=args.out)
         return
     parts = kit.moving_parts()
     wedges, placements = {}, {}
@@ -702,7 +711,7 @@ def main() -> None:
         write_viewer(kit, by_drop, plate, cradle, args.out)
 
 
-def explorer_block(kit: Kit, names: Dict[str, str]) -> dict:
+def explorer_block(kit: Kit, names: Dict[str, str], out_dir: str) -> dict:
     """
     Data for the viewer's "Pose explorer": the case->world matrix at tilt 0 with the hinge
     axis on the lip face (axis_Y = 0, drop 0), plus the world point of that axis. The viewer poses
@@ -734,7 +743,26 @@ def explorer_block(kit: Kit, names: Dict[str, str]) -> dict:
     for vname, v in kit.variants.items():
         tip = v.place_exit(cq.Workplane().add(cq.Vertex.makeVertex(v.nozzle_l, 0, v.cable_z))).val().toTuple()
         tips[vname.replace("+", "p").replace("-", "m")] = list(tip)
-    w = g.wall_out
+    # Cradle-free mount (what --pose builds): thick-floor base (+ cable cap) and lid per variant,
+    # already in the mount frame (outer floor at floor_bot), so the explorer poses them like the
+    # cradle-held case. The nozzle tips move with the thicker floor.
+    direct = {}
+    for vname in kit.variants:
+        p = kit.direct_params(vname)
+        vtag = vname.replace("+", "p").replace("-", "m")
+        solids = [kit.to_mount_frame(kit.build_direct_base(vname)).val()]
+        if p.use_cap:
+            solids.append(kit.to_mount_frame(case.build_cable_cap(p)).val())
+        meshes = {"base": cq.Workplane().add(cq.Compound.makeCompound(solids)), "lid": kit.to_mount_frame(case.build_lid(p))}
+        direct[vtag] = {}
+        for part, shape in meshes.items():
+            fn = f"viewer_kit_direct_{vtag}_{part}.stl"
+            cq.exporters.export(shape, os.path.join(out_dir, fn), tolerance=0.05, angularTolerance=0.2)
+            direct[vtag][part] = fn
+        tip = p.place_exit(cq.Workplane().add(cq.Vertex.makeVertex(p.nozzle_l, 0, p.cable_z)))
+        tips[vtag] = list(kit.to_mount_frame(tip).val().toTuple())
+    w = kit.direct_params("end").out_w / 2           # the cradle-free wedge is case-wide
+    a0, dy0, dz0, s0 = kp.chosen_pose
     return {"m0": m0, "axis": list(axis), "cradle_x0": g.cradle_x0, "cradle_x1": g.cradle_x1,
             "floor_bot": g.floor_bot, "pad_x": kp.pad_w, "pad_y": 2 * w,
             "plate_t": mp.plate_t, "face_x": w,
@@ -742,7 +770,8 @@ def explorer_block(kit: Kit, names: Dict[str, str]) -> dict:
             "slab": {"x": g.plate_x1, "y": mp.plate_t + kp.rail_h, "z": mp.plate_h},
             "nozzle_tips": tips, "plate": names["plate"], "cradle": names["cradle"],
             "slope": kp.below_slope_deg, "gap": kp.below_gap, "toolhead": [kp.toolhead_dy - kp.toolhead_margin, kp.toolhead_dz - kp.toolhead_margin],
-            "window_z": kp.window_z - kp.window_margin}
+            "window_z": kp.window_z - kp.window_margin, "direct": direct,
+            "chosen": {"angle": a0, "dy": dy0, "dz": dz0, "shift": s0, "case": kp.chosen_case}}
 
 
 def write_viewer(kit: Kit, by_drop, plate, cradle, out: str) -> None:
@@ -797,7 +826,8 @@ def write_viewer(kit: Kit, by_drop, plate, cradle, out: str) -> None:
                     "upside_down": rot == 180, "slope": kit.kp.below_slope_deg, "gap": kit.kp.below_gap,
                     "toolhead": [kit.kp.toolhead_dy, kit.kp.toolhead_dz],
                     "plate_h": kit.mp.plate_h, "axis_from_wall": placements[a]}
-    configs["_explorer"] = explorer_block(kit, names)
+    configs["_explorer"] = explorer_block(kit, names, out)
+    names.update({f"direct_{v}_{k}": fn for v, d in configs["_explorer"]["direct"].items() for k, fn in d.items()})
     with open(os.path.join(out, "viewer_kit.json"), "w") as f:
         json.dump({"files": sorted(set(names.values())), "configs": configs}, f, indent=1)
     log.info("Wrote viewer kit data: %d configs, %d meshes", len(configs), len(names))
