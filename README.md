@@ -15,6 +15,7 @@ The camera is a 62.3 × 9 × 5.5 mm strip board with a Sony IMX298 sensor and a 
 | `stl/elp_16mp_coupon_{base,lid}.stl` | Snap test coupon: the -X end of the case (12 mm slice) to test the hook click and release before a full print. |
 | `stl/elp_16mp_size_mockup.stl` | Solid block with the assembled case's outside shape, nozzle and lens window included, plus a crosshair on the lens axis. Print it to find a mount spot inside the printer. |
 | `step/elp_16mp_case.step` | Assembled base + lid (snap version) for CAD. |
+| `step/elp_16mp_iteration.step` | For positioning the camera in your own CAD. Named bodies: `case_base`, `case_lid`, `ref_camera_mock`, `ref_size_mockup_offset_-40y`, and two 450 mm field-of-view pyramids (`ref_fov_stream_16x9` at 97 × 65°, `ref_fov_sensor_4x3` at 97 × 81°). Units are mm. The origin is the board centre, Z = 0 is the outside of the base floor, the lens faces +Z, X is the board length, and the cable nozzle is at +X. The sensor's long axis is assumed to run along X. |
 | `viewer/index.html` | Self-contained three.js viewer with explode, section cut and FOV cone. Open it in a browser. |
 
 ## Design

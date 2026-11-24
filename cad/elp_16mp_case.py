@@ -135,6 +135,15 @@ class Params:
     mock_mark_lx: float = 24.0   # crosshair arm length along X (Y arm is derived from out_w)
     mock_mark_edge: float = 1.0  # plain margin left between the Y arm and the long faces
 
+    # --- FOV reference bodies (iteration STEP only; never printed) ---
+    # Pyramids from the lens front along +Z so the view can be checked against
+    # the printer in CAD. paxx12 firmware streams USB cameras at 16:9 only, so
+    # the stream frame is HFOV x atan(tan(HFOV/2) * 9/16), assuming 1080p is the
+    # full sensor width scaled (unverified; a centre crop would be narrower).
+    fov_ref_len: float = 450.0   # pyramid length, mm: past the bed at the bottom of Z travel
+    stream_aspect_w: float = 16.0
+    stream_aspect_h: float = 9.0
+
     # --- Derived geometry ---
     @property
     def bay(self): return self.cable_bay_l if self.cable_exit == "end" else 0.0
@@ -219,6 +228,11 @@ class Params:
         """Vertical FOV from HFOV and aspect, rectilinear lens."""
         tan_h = math.tan(math.radians(self.hfov_deg / 2))
         return 2 * math.degrees(math.atan(tan_h * self.aspect_h / self.aspect_w))
+
+    def fov_deg_for_aspect(self, aspect_w: float, aspect_h: float) -> tuple:
+        """(horizontal, vertical) FOV in degrees for a frame of this aspect at full sensor width."""
+        tan_h = math.tan(math.radians(self.hfov_deg / 2))
+        return self.hfov_deg, 2 * math.degrees(math.atan(tan_h * aspect_h / aspect_w))
 
     def window_d_at(self, height_above_lens: float) -> float:
         """Window diameter needed at a given height above the lens front."""
@@ -504,6 +518,46 @@ def build_size_mockup(p: Params) -> cq.Workplane:
     return body
 
 
+def build_fov_pyramid(p: Params, aspect_w: float, aspect_h: float) -> cq.Workplane:
+    """
+    Field-of-view reference solid: apex at the lens front centre, opening along
+    +Z, fov_ref_len long. The sensor long axis is ASSUMED along X.
+    """
+    hfov, vfov = p.fov_deg_for_aspect(aspect_w, aspect_h)
+    half_x = p.fov_ref_len * math.tan(math.radians(hfov / 2))
+    half_y = p.fov_ref_len * math.tan(math.radians(vfov / 2))
+    apex = 0.02   # loft needs a non-degenerate start; 0.02 mm square at the lens front
+    log.debug("FOV pyramid %g:%g -> %.1f x %.1f deg, %.0f x %.0f mm at %.0f mm",
+              aspect_w, aspect_h, hfov, vfov, 2 * half_x, 2 * half_y, p.fov_ref_len)
+    return (cq.Workplane("XY", origin=(p.lens_x, p.lens_y, p.z_lens_top + 0.01)).rect(apex, apex)
+            .workplane(offset=p.fov_ref_len).rect(2 * half_x, 2 * half_y).loft())
+
+
+def build_ray_envelope(p: Params, length: float) -> cq.Workplane:
+    """
+    Every ray the lens can accept (full 4:3 sensor), out to `length` above the lens front.
+
+    The entrance aperture is a disc of aperture_d; the frame is a pyramid. Their
+    Minkowski sum at height h is the h-scaled frame rectangle with corners
+    rounded by the aperture radius, which is linear in h, so a loft between two
+    rounded rectangles is exact. A point-apex pyramid would miss vignetting
+    because the real aperture is 3 mm wide.
+    """
+    r = p.aperture_d / 2
+    tan_h = math.tan(math.radians(p.hfov_deg / 2))
+    tan_v = tan_h * p.aspect_h / p.aspect_w
+    eps = 0.01   # keeps the start section a valid rounded rectangle, not a bare circle
+
+    def section(h: float) -> cq.Sketch:
+        return (cq.Sketch().rect(2 * (h * tan_h + r) + eps, 2 * (h * tan_v + r) + eps)
+                .vertices().fillet(r))
+
+    z0 = p.z_lens_top + 0.01
+    return (cq.Workplane("XY", origin=(p.lens_x, p.lens_y, z0))
+            .placeSketch(section(0.0), section(length).moved(cq.Location(cq.Vector(0, 0, length))))
+            .loft())
+
+
 def mock_module(p: Params) -> cq.Workplane:
     """Rough stand-in for the camera: PCB plus an assumed 8 mm square AF lens block."""
     pcb = _box(-p.pcb_l / 2, p.pcb_l / 2, -p.pcb_w / 2, p.pcb_w / 2, p.z_pcb_bottom, p.z_pcb_top)
@@ -550,6 +604,13 @@ def self_check(p: Params, base: cq.Workplane, lid: cq.Workplane) -> None:
         if abs(kept - hook.val().Volume()) > 1e-6:
             raise RuntimeError("snap coupon truncates the -X hook")
         log.debug("Coupon: base %.1f mm^3, lid %.1f mm^3", c_base.val().Volume(), c_lid.val().Volume())
+    # The lid window must pass every ray the lens accepts on the full 4:3 frame
+    rays = build_ray_envelope(p, p.front_gap + p.lid_t + 1.0)
+    clip = lid.intersect(rays)
+    vol = sum(s.Volume() for s in clip.solids().vals())
+    log.debug("Lid vs lens ray envelope: %.4f mm^3", vol)
+    if vol > 1e-3:
+        raise RuntimeError(f"lid vignettes the full-sensor FOV ({vol:.3f} mm^3 in the view)")
     log.info("Self-check passed: single valid solids, no interference with mock module")
 
 
@@ -589,10 +650,24 @@ def main() -> None:
         "elp_16mp_case.step": cq.Assembly().add(base, name="base").add(lid, name="lid").toCompound(),
     }
     exports["elp_16mp_size_mockup.stl"] = build_size_mockup(p)
+    # Iteration STEP: named, coloured bodies in assembled position, case coordinates
+    iteration = (cq.Assembly(name="elp_16mp_iteration")
+                 .add(base, name="case_base", color=cq.Color(0.31, 0.49, 0.67))
+                 .add(lid, name="case_lid", color=cq.Color(0.85, 0.55, 0.23))
+                 .add(mock_module(p), name="ref_camera_mock", color=cq.Color(0.24, 0.60, 0.37))
+                 .add(build_size_mockup(p).translate((0, -40, 0)), name="ref_size_mockup_offset_-40y",
+                      color=cq.Color(0.69, 0.37, 0.63))
+                 .add(build_fov_pyramid(p, p.stream_aspect_w, p.stream_aspect_h), name="ref_fov_stream_16x9",
+                      color=cq.Color(0.88, 0.29, 0.29, 0.25))
+                 .add(build_fov_pyramid(p, p.aspect_w, p.aspect_h), name="ref_fov_sensor_4x3",
+                      color=cq.Color(0.95, 0.65, 0.2, 0.15)))
     if p.closure == "snap":
         c_base, c_lid = build_coupon(p, base, lid)
         exports["elp_16mp_coupon_base.stl"] = c_base
         exports["elp_16mp_coupon_lid.stl"] = flip_lid(c_lid)
+    iteration_path = os.path.join(args.out, "elp_16mp_iteration.step")
+    iteration.save(iteration_path)
+    log.info("Wrote %s (%d bytes)", iteration_path, os.path.getsize(iteration_path))
     for name, shape in exports.items():
         path = os.path.join(args.out, name)
         if name.endswith(".stl"):
