@@ -78,6 +78,9 @@ def main() -> None:
             entry["fixed"] = b64(os.path.join(args.stl_dir, m["files"]["fixed"]))
             if "cradle" in m["files"]:
                 entry["cradle"] = b64(os.path.join(args.stl_dir, m["files"]["cradle"]))
+            for k in ("case_base", "case_lid"):
+                if k in m["files"]:
+                    entry[k] = b64(os.path.join(args.stl_dir, m["files"][k]))
             mounts[key] = entry
     mounts_js = "const MOUNTS=%s;" % json.dumps(mounts, separators=(",", ":"))
     html, n = re.subn(r"const MOUNTS=\{.*?\};", lambda _: mounts_js, html, count=1, flags=re.S)

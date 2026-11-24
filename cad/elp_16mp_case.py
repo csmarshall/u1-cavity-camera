@@ -57,6 +57,16 @@ class Params:
     aspect_h: float = 3.0
     aperture_d: float = 3.0      # ASSUMED clear diameter of the lens front element
     window_margin: float = 0.6   # extra radius so the lid edge never vignettes
+    # Lens cover: a round glass cover slip glued into a recess in the lid's
+    # underside, 0.4 mm above the lens (front_gap), where the window opening is
+    # smallest. Close to the lens means a small slip and almost no glare. The lid
+    # prints face down, so the recess faces up in print (no overhang).
+    lens_slip: bool = True
+    slip_d: float = 8.0          # 8 mm round #1.5 cover glass (lab stock item)
+    slip_t: float = 0.19         # #1.5 is 0.16-0.19 mm; use the thick end
+    slip_fit: float = 0.15       # radial clearance in the recess
+    slip_glue: float = 0.06      # extra recess depth for the glue film
+    slip_min_seat: float = 0.6   # slip overlap onto the ledge around the window, for glue
 
     # --- Fit ---
     fit: float = 0.3             # clearance per side around the PCB
@@ -92,7 +102,7 @@ class Params:
     screw_y_end: float = 3.4     # Y position of the screw on the cable end
 
     # --- Cable exit ---
-    cable_exit: str = "end"      # "end" (+X short side) or "side" (long wall)
+    cable_exit: str = "end"      # "end" (+X short side), "side_end" (long wall at the +X bay, with nozzle), or "side" (legacy long-wall slot)
     cable_w: float = 3.6         # slot width (fits a 4-wire bundle; widen for a flat cable)
     cable_bay_l: float = 4.0     # free space past the board end for the plug and cable bend
     cable_y: float = -2.4        # end-slot centre across the end wall
@@ -118,7 +128,8 @@ class Params:
     stop_l: float = 1.0          # length of the board stop nubs at the bay boundary
     stop_w: float = 1.0          # width of each nub (PCB edge zone only)
     cable_x: float = 26.0        # side-slot centre along X
-    cable_side: int = 1          # side-slot wall: +1 = +Y, -1 = -Y
+    cable_side: int = 1          # side / side_end wall: +1 = +Y, -1 = -Y
+    side_exit_gap: float = 0.3   # side_end: bore clearance past the board stop nubs
 
     # --- PCB hold-down ribs on the lid (press on the PCB long edges) ---
     rib_xs: tuple = (-20.0, 20.0)  # rib centres along X; move if they foul a component
@@ -154,7 +165,13 @@ class Params:
 
     # --- Derived geometry ---
     @property
-    def bay(self): return self.cable_bay_l if self.cable_exit == "end" else 0.0
+    def bay(self):
+        if self.cable_exit == "end":
+            return self.cable_bay_l
+        if self.cable_exit == "side_end":
+            # Derived: stop nubs, clearance, the bore, and a min web to the end block
+            return self.stop_l + self.side_exit_gap + self.cable_w + 0.8
+        return 0.0
 
     @property
     def cav_l(self): return self.pcb_l + 2 * self.fit
@@ -193,7 +210,27 @@ class Params:
     def base_h(self): return self.z_lens_top + self.front_gap
 
     @property
-    def use_nozzle(self): return self.nozzle and self.cable_exit == "end"
+    def use_nozzle(self): return self.nozzle and self.cable_exit in ("end", "side_end")
+
+    @property
+    def exit_wall(self):
+        """Thickness of the wall the cable passes through: end block or long wall."""
+        return self.ear_l if self.cable_exit == "end" else self.wall
+
+    @property
+    def exit_x(self):
+        """side_end: X of the cable axis, just past the board stop nubs in the bay."""
+        return self.cav_l / 2 + self.stop_l + self.side_exit_gap + self.cable_w / 2
+
+    def place_exit(self, wp: cq.Workplane) -> cq.Workplane:
+        """
+        Exit frame -> case frame. Exit frame: u along the cable outward (u=0 on the
+        outer face of the wall it leaves through), v across it, z as the case.
+        """
+        if self.cable_exit == "side_end":
+            return (wp.rotate((0, 0, 0), (0, 0, 1), 90 * self.cable_side)
+                    .translate((self.exit_x, self.cable_side * self.out_w / 2, 0)))
+        return wp.translate((self.out_x1, self.cable_y, 0))
 
     @property
     def cable_z(self):
@@ -252,8 +289,10 @@ class Params:
 
 def validate(p: Params) -> None:
     """Fail early on parameter combinations that cannot produce a usable part."""
-    if p.cable_exit not in ("end", "side"):
-        raise ValueError("cable_exit must be 'end' or 'side'")
+    if p.cable_exit not in ("end", "side", "side_end"):
+        raise ValueError("cable_exit must be 'end', 'side_end' or 'side'")
+    if p.cable_exit in ("side", "side_end") and p.cable_side not in (1, -1):
+        raise ValueError("cable_side must be +1 or -1")
     if p.closure not in ("snap", "screw"):
         raise ValueError("closure must be 'snap' or 'screw'")
     if p.rail_w * 2 >= p.cav_w:
@@ -265,17 +304,22 @@ def validate(p: Params) -> None:
             raise ValueError("cable slot falls outside the cavity; reduce |cable_x|")
         if p.cable_side not in (1, -1):
             raise ValueError("cable_side must be +1 or -1")
-    elif abs(p.cable_y) + p.cable_w / 2 > p.cav_w / 2:
+    elif p.cable_exit == "end" and abs(p.cable_y) + p.cable_w / 2 > p.cav_w / 2:
         raise ValueError("end cable slot is wider than the cavity at cable_y")
+    if p.cable_exit == "side_end" and p.use_nozzle:
+        if p.exit_x + p.nozzle_r > p.out_x1 - p.corner_r:
+            raise ValueError("side nozzle runs into the case's rounded +X corner")
+        log.debug("Side exit at x=%.2f on the %s wall, bay %.2f mm", p.exit_x,
+                  "+Y" if p.cable_side > 0 else "-Y", p.bay)
 
     if p.use_nozzle:
         if p.nozzle_valley_r - p.cable_w / 2 < 0.8:
             raise ValueError("nozzle wall too thin in the valleys; raise nozzle_valley_r or narrow cable_w")
         if p.cable_z - p.cable_w / 2 < 0.8:
             raise ValueError("nozzle bore too close to the bed; reduce nozzle_flat")
-        if abs(p.cable_y) + p.nozzle_r > p.out_w / 2:
+        if p.cable_exit == "end" and abs(p.cable_y) + p.nozzle_r > p.out_w / 2:
             raise ValueError("nozzle sticks out past the long side of the case")
-        if p.closure == "snap":
+        if p.closure == "snap" and p.cable_exit == "end":
             h = p.hooks()[1]
             win_lo = h["y"] - p.hook_w / 2 - p.hook_clear
             gap = win_lo - (p.cable_y + p.nozzle_r)
@@ -319,6 +363,19 @@ def validate(p: Params) -> None:
             raise ValueError("coupon_l too short to contain the -X snap pocket and a wall stub")
 
     outer_d = p.window_d_at(p.front_gap + p.lid_t)
+    if p.lens_slip:
+        depth = p.slip_t + p.slip_glue
+        r_rec = p.slip_d / 2 + p.slip_fit
+        if p.lid_t - depth < 0.8:
+            raise ValueError("slip recess leaves under 0.8 mm of lid above it")
+        if p.out_w / 2 - (abs(p.lens_y) + r_rec) < min_web:
+            raise ValueError(f"slip recess ({2 * r_rec:.1f} mm) leaves under {min_web} mm to the lid's long edges")
+        hole_r = p.window_d_at(p.front_gap + depth) / 2
+        seat = p.slip_d / 2 - hole_r
+        log.debug("Cover slip %.1f mm: window hole at the ledge %.2f mm dia, seat overlap %.2f mm",
+                  p.slip_d, 2 * hole_r, seat)
+        if seat < p.slip_min_seat:
+            raise ValueError(f"cover slip only overlaps the ledge by {seat:.2f} mm; use a bigger slip")
     if p.mock_mark_lx / 2 + abs(p.lens_x) > p.out_l / 2 - min_web:
         raise ValueError("mockup crosshair X arm runs off the end of the case")
     if p.mock_mark_lx <= outer_d + 4.0:
@@ -363,25 +420,29 @@ def build_nozzle(p: Params) -> cq.Workplane:
 
     body = (cq.Workplane("XY").polyline(pts).close()
             .revolve(360, (0, 0, 0), (1, 0, 0))
-            .translate((p.out_x1 - 0.2, p.cable_y, p.cable_z)))  # 0.2 overlap fuses it to the end face
+            .translate((-0.2, 0, p.cable_z)))  # 0.2 overlap fuses it to the wall face
     # Flatten the bottom so it sits on the bed (no supports)
-    return body.intersect(_box(p.out_x1 - 1, p.out_x1 + p.nozzle_l + 1, -50, 50, 0, 50))
+    return p.place_exit(body).intersect(_box(-200, 200, -200, 200, 0, 50))
 
 
-def _cable_bore(p: Params, x0: float, r: float) -> cq.Workplane:
-    """Cylinder on the cable axis from x0 to past the nozzle tip."""
-    x_end = p.out_x1 + p.nozzle_l + 0.1
-    return cq.Workplane().add(cq.Solid.makeCylinder(r, x_end - x0, pnt=cq.Vector(x0, p.cable_y, p.cable_z),
-                                                    dir=cq.Vector(1, 0, 0)))
+def _cable_bore(p: Params, u0: float, r: float) -> cq.Workplane:
+    """Cylinder on the cable axis from exit-frame u0 (negative = inside the wall) to past the nozzle tip."""
+    u1 = p.nozzle_l + 0.1
+    return p.place_exit(cq.Workplane().add(cq.Solid.makeCylinder(r, u1 - u0, pnt=cq.Vector(u0, 0, p.cable_z),
+                                                                 dir=cq.Vector(1, 0, 0))))
+
+
+def _exit_box(p: Params, u0, u1, v0, v1, z0, z1) -> cq.Workplane:
+    """Box given in the exit frame."""
+    return p.place_exit(_box(u0, u1, v0, v1, z0, z1))
 
 
 def build_cable_cap(p: Params) -> cq.Workplane:
     """Upper half of the ridged nozzle, outside the end face, with the bore groove underneath."""
-    x_end = p.out_x1 + p.nozzle_l + 0.1
-    cap = build_nozzle(p).intersect(_box(p.out_x1, x_end + 1, -50, 50, p.cable_z, 50))
-    cap = cap.cut(_cable_bore(p, p.out_x1 - 1, p.cable_w / 2))
-    log.debug("Cable cap: x %.2f..%.2f, z %.2f..%.2f", p.out_x1, p.out_x1 + p.nozzle_l - 0.2,
-              p.cable_z, p.cable_z + p.nozzle_r)
+    r_out = p.nozzle_r + 1
+    cap = build_nozzle(p).intersect(_exit_box(p, 0, p.nozzle_l + 1, -r_out, r_out, p.cable_z, 50))
+    cap = cap.cut(_cable_bore(p, -1, p.cable_w / 2))
+    log.debug("Cable cap: %s exit, z %.2f..%.2f", p.cable_exit, p.cable_z, p.cable_z + p.nozzle_r)
     return cap
 
 
@@ -390,13 +451,13 @@ def build_lid_tongue(p: Params) -> cq.Workplane:
     r_b = p.cable_w / 2
     z_bot = p.cable_z + r_b
     half = r_b - p.cap_fit
-    log.debug("Lid tongue: y %.2f +/- %.2f, z %.2f..%.2f", p.cable_y, half, z_bot, p.base_h)
-    return _box(p.cav_x1, p.out_x1, p.cable_y - half, p.cable_y + half, z_bot, p.base_h)
+    log.debug("Lid tongue: %s exit, +/- %.2f, z %.2f..%.2f", p.cable_exit, half, z_bot, p.base_h)
+    return _exit_box(p, -p.exit_wall, 0, -half, half, z_bot, p.base_h)
 
 
 def mock_cable(p: Params) -> cq.Workplane:
     """Cable stand-in along the bore, cable_clear smaller in radius than the bore."""
-    return _cable_bore(p, p.cav_x1 - 0.1, p.cable_w / 2 - p.cable_clear)
+    return _cable_bore(p, -(p.exit_wall + 0.1), p.cable_w / 2 - p.cable_clear)
 
 
 def build_base(p: Params) -> cq.Workplane:
@@ -414,33 +475,30 @@ def build_base(p: Params) -> cq.Workplane:
     log.debug("PCB seat z=%.2f, PCB top z=%.2f, lens top z=%.2f",
               p.z_pcb_bottom, p.z_pcb_top, p.z_lens_top)
 
-    if p.cable_exit == "end":
+    if p.cable_exit in ("end", "side_end"):
         x0 = p.cav_l / 2
         for side in (1, -1):
             base = base.union(_box(x0, x0 + p.stop_l, side * cw, side * (cw - p.stop_w),
                                    p.floor, p.z_pcb_top + 1.0))
         if p.use_nozzle:
             base = base.union(build_nozzle(p))
-            x_end = p.out_x1 + p.nozzle_l + 0.1
+            u_in, u_end = -(p.exit_wall + 0.1), p.nozzle_l + 0.1
             r_b = p.cable_w / 2
-            # Round-bottomed bore along the cable axis, through end block and nozzle
-            bore = cq.Solid.makeCylinder(r_b, x_end - (p.cav_x1 - 0.1),
-                                         pnt=cq.Vector(p.cav_x1 - 0.1, p.cable_y, p.cable_z),
-                                         dir=cq.Vector(1, 0, 0))
-            base = base.cut(cq.Workplane().add(bore))
+            # Round-bottomed bore along the cable axis, through the wall and nozzle
+            base = base.cut(_cable_bore(p, u_in, r_b))
             # Open-top slot above the bore so the cable lays in from above
-            base = base.cut(_box(p.cav_x1 - 0.1, x_end, p.cable_y - r_b, p.cable_y + r_b,
-                                 p.cable_z, p.base_h + 1))
+            base = base.cut(_exit_box(p, u_in, u_end, -r_b, r_b, p.cable_z, p.base_h + 1))
             if p.use_cap:
                 # Upper half of the nozzle belongs to the cap
-                base = base.cut(_box(p.out_x1, x_end + 1, -50, 50, p.cable_z, p.base_h + 1))
+                r_out = p.nozzle_r + 1
+                base = base.cut(_exit_box(p, 0, u_end + 1, -r_out, r_out, p.cable_z, p.base_h + 1))
             log.debug("Nozzle: axis z=%.2f, peak r=%.2f, valley r=%.2f, length %.1f, cap=%s",
                       p.cable_z, p.nozzle_r, p.nozzle_valley_r, p.nozzle_l, p.use_cap)
         else:
             base = base.cut(_box(p.cav_x1 - 0.1, p.out_x1 + 0.1,
                                  p.cable_y - p.cable_w / 2, p.cable_y + p.cable_w / 2,
                                  p.floor, p.base_h + 1))
-        log.debug("End slot y=%.2f w=%.2f, bay %.1f mm", p.cable_y, p.cable_w, p.bay)
+        log.debug("Cable exit %s, w=%.2f, bay %.1f mm", p.cable_exit, p.cable_w, p.bay)
     else:
         y_in = p.cable_side * (cw - p.rail_w - 0.1)
         y_out = p.cable_side * (hw + 0.1)
@@ -494,6 +552,8 @@ def build_lid(p: Params) -> cq.Workplane:
     cone = cq.Solid.makeCone(d_in / 2 - slope * eps, d_out / 2 + slope * eps, p.lid_t + 2 * eps,
                              pnt=cq.Vector(p.lens_x, p.lens_y, z0 - eps), dir=cq.Vector(0, 0, 1))
     lid = lid.cut(cq.Workplane().add(cone))
+    if p.lens_slip:
+        lid = lid.cut(build_slip_recess(p))
 
     if p.closure == "screw":
         # Countersunk so flat-head screws sit flush with the lid top
@@ -540,15 +600,10 @@ def build_size_mockup(p: Params) -> cq.Workplane:
     body = _box(p.out_x0, p.out_x1, -hw, hw, 0, z_top).edges("|Z").fillet(p.corner_r)
     if p.use_nozzle:
         body = body.union(build_nozzle(p))
-        x_end = p.out_x1 + p.nozzle_l + 0.1
         r_b = p.cable_w / 2
-        bore = cq.Solid.makeCylinder(r_b, x_end - (p.out_x1 - 0.2),
-                                     pnt=cq.Vector(p.out_x1 - 0.2, p.cable_y, p.cable_z),
-                                     dir=cq.Vector(1, 0, 0))
-        body = body.cut(cq.Workplane().add(bore))
+        body = body.cut(_cable_bore(p, -0.2, r_b))
         if not p.use_cap:
-            body = body.cut(_box(p.out_x1 - 0.2, x_end, p.cable_y - r_b, p.cable_y + r_b,
-                                 p.cable_z, p.base_h + 1))
+            body = body.cut(_exit_box(p, -0.2, p.nozzle_l + 0.1, -r_b, r_b, p.cable_z, p.base_h + 1))
     # Lens window cone, same as the lid, so the opening reads true
     d_in, d_out = p.window_d_at(p.front_gap), p.window_d_at(p.front_gap + p.lid_t)
     slope = (d_out - d_in) / 2 / p.lid_t
@@ -580,6 +635,26 @@ def build_fov_pyramid(p: Params, aspect_w: float, aspect_h: float) -> cq.Workpla
               aspect_w, aspect_h, hfov, vfov, 2 * half_x, 2 * half_y, p.fov_ref_len)
     return (cq.Workplane("XY", origin=(p.lens_x, p.lens_y, p.z_lens_top + 0.01)).rect(apex, apex)
             .workplane(offset=p.fov_ref_len).rect(2 * half_x, 2 * half_y).loft())
+
+
+def slip_recess_depth(p: Params) -> float:
+    return p.slip_t + p.slip_glue
+
+
+def build_slip_recess(p: Params) -> cq.Workplane:
+    """Round pocket up into the lid underside, centred on the lens."""
+    r = p.slip_d / 2 + p.slip_fit
+    return cq.Workplane().add(cq.Solid.makeCylinder(r, slip_recess_depth(p) + 0.01,
+                                                    pnt=cq.Vector(p.lens_x, p.lens_y, p.base_h - 0.01),
+                                                    dir=cq.Vector(0, 0, 1)))
+
+
+def build_slip(p: Params) -> cq.Workplane:
+    """The cover slip itself, seated against the top of the recess (glue film below the lid)."""
+    z_top = p.base_h + slip_recess_depth(p)
+    return cq.Workplane().add(cq.Solid.makeCylinder(p.slip_d / 2, p.slip_t,
+                                                    pnt=cq.Vector(p.lens_x, p.lens_y, z_top - p.slip_glue - p.slip_t),
+                                                    dir=cq.Vector(0, 0, 1)))
 
 
 def build_ray_envelope(p: Params, length: float) -> cq.Workplane:
@@ -629,9 +704,9 @@ def self_check(p: Params, base: cq.Workplane, lid: cq.Workplane) -> None:
             raise RuntimeError("cable cap is not a single valid solid")
         # Outside the end face, base half + cap must rebuild the whole ridged nozzle
         # (minus the bore), or the heat shrink has a gap to fall into
-        x_end = p.out_x1 + p.nozzle_l + 1
-        zone = _box(p.out_x1, x_end, -50, 50, -1, 50)
-        want = build_nozzle(p).cut(_cable_bore(p, p.out_x1 - 1, p.cable_w / 2)).intersect(zone).val().Volume()
+        r_out = p.nozzle_r + 1
+        zone = _exit_box(p, 0, p.nozzle_l + 1, -r_out, r_out, -1, 50)
+        want = build_nozzle(p).cut(_cable_bore(p, -1, p.cable_w / 2)).intersect(zone).val().Volume()
         got = base.intersect(zone).val().Volume() + cap.val().Volume()
         log.debug("Nozzle outside end face: base half + cap = %.2f mm^3, full nozzle = %.2f mm^3", got, want)
         if abs(got - want) > 0.01 * want:
@@ -672,6 +747,21 @@ def self_check(p: Params, base: cq.Workplane, lid: cq.Workplane) -> None:
         if abs(kept - hook.val().Volume()) > 1e-6:
             raise RuntimeError("snap coupon truncates the -X hook")
         log.debug("Coupon: base %.1f mm^3, lid %.1f mm^3", c_base.val().Volume(), c_lid.val().Volume())
+    if p.lens_slip:
+        slip = build_slip(p)
+        for name, part in (("lid", lid), ("module", module)):
+            v = sum(s_.Volume() for s_ in slip.intersect(part).solids().vals())
+            if v > 1e-6:
+                raise RuntimeError(f"cover slip interferes with the {name} ({v:.4f} mm^3)")
+        # Every accepted ray must pass through the glass, not around its edge:
+        # within the slip's thickness, the ray envelope must sit inside the disc
+        rays = build_ray_envelope(p, 5.0)
+        z0 = slip.val().BoundingBox().zmin
+        slab = _box(-50, 50, -50, 50, z0, z0 + p.slip_t)
+        outside = sum(s_.Volume() for s_ in rays.intersect(slab).cut(slip).solids().vals())
+        log.debug("Ray envelope outside the cover slip: %.5f mm^3", outside)
+        if outside > 1e-4:
+            raise RuntimeError("some of the field of view passes around the cover slip")
     # The lid window must pass every ray the lens accepts on the full 4:3 frame
     rays = build_ray_envelope(p, p.front_gap + p.lid_t + 1.0)
     clip = lid.intersect(rays)
@@ -685,6 +775,9 @@ def self_check(p: Params, base: cq.Workplane, lid: cq.Workplane) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="out", help="output directory")
+    ap.add_argument("--closure", choices=["snap", "screw"], default="snap")
+    ap.add_argument("--cable-exit", choices=["end", "side_end", "side"], default="end")
+    ap.add_argument("--cable-side", type=int, choices=[1, -1], default=1, help="side_end/side: +1 = +Y wall, -1 = -Y wall")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"),
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
@@ -692,7 +785,7 @@ def main() -> None:
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%Y-%m-%dT%H:%M:%S%z")
 
-    p = Params()
+    p = Params(closure=args.closure, cable_exit=args.cable_exit, cable_side=args.cable_side)
     log.debug("Parameters: %s", asdict(p))
     try:
         validate(p)
@@ -741,7 +834,12 @@ def main() -> None:
         c_base, c_lid = build_coupon(p, base, lid)
         exports["elp_16mp_coupon_base.stl"] = c_base
         exports["elp_16mp_coupon_lid.stl"] = flip_lid(c_lid)
-    iteration_path = os.path.join(args.out, "elp_16mp_iteration.step")
+    # Non-default variants get a suffix so they never overwrite the default files
+    sfx = ("" if p.closure == "snap" else f"_{p.closure}") + \
+          ("" if p.cable_exit == "end" else f"_{p.cable_exit}{'+Y' if p.cable_side > 0 else '-Y'}")
+    if sfx:
+        exports = {n.replace(".stl", f"{sfx}.stl").replace(".step", f"{sfx}.step"): v for n, v in exports.items()}
+    iteration_path = os.path.join(args.out, f"elp_16mp_iteration{sfx}.step")
     iteration.save(iteration_path)
     log.info("Wrote %s (%d bytes)", iteration_path, os.path.getsize(iteration_path))
     for name, shape in exports.items():
@@ -754,7 +852,7 @@ def main() -> None:
     geom = {"lens_x": p.lens_x, "lens_y": p.lens_y, "lens_top_z": p.z_lens_top,
             "hfov_deg": p.hfov_deg, "vfov_deg": p.vfov_deg,
             "dfov_deg": 2 * math.degrees(math.atan(p.tan_half_dfov))}
-    with open(os.path.join(args.out, "viewer_params.json"), "w") as f:
+    with open(os.path.join(args.out, f"viewer_params{sfx}.json"), "w") as f:
         json.dump(geom, f, indent=1)
     log.debug("Viewer params: %s", geom)
     log.info("Assembled outer size: %.1f x %.1f x %.1f mm", p.out_l, p.out_w, p.base_h + p.lid_t)

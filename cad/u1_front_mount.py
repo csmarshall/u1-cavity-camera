@@ -182,7 +182,7 @@ class Geometry:
         if self.mp.mount_side == "below":
             # End hinge: arms outside everything that swings (case, nozzle, cap)
             xa0 = cp.out_x0 - mp.end_gap
-            xb1 = (cp.out_x1 + cp.nozzle_l if cp.use_nozzle else cp.out_x1) + mp.end_gap
+            xb1 = (cp.out_x1 + cp.nozzle_l if (cp.use_nozzle and cp.cable_exit == "end") else cp.out_x1) + mp.end_gap
             cw = mp.cradle_knuckle_w
             return {"plate": [(xa0 - mp.arm_w, xa0), (xb1, xb1 + mp.arm_w)],
                     "cradle": [(xa0 + mp.knuckle_gap, self.cradle_x0 + cw),
@@ -206,6 +206,24 @@ class Geometry:
         self.axis_Y = saved
         # Bounding boxes of rotated solids are conservative, so this never under-sizes the arm
         return self.mp.plate_t + self.mp.swing_gap - min_y
+
+    def side_notch(self):
+        """side_end cable exit: (x0, x1, side) of the cradle-wall notch the nozzle passes through, else None."""
+        cp = self.cp
+        if cp.cable_exit != "side_end" or not cp.use_nozzle:
+            return None
+        half = cp.nozzle_r + 0.6
+        return (cp.exit_x - half, cp.exit_x + half, cp.cable_side)
+
+    def lip_xs(self) -> Tuple[float, ...]:
+        """Lip centres, moved inboard of the side-exit notch when they would overlap it."""
+        mp, notch = self.mp, self.side_notch()
+        out = []
+        for xc in mp.lip_x:
+            if notch and xc + mp.lip_l / 2 > notch[0] - 1.0 and xc - mp.lip_l / 2 < notch[1] + 1.0:
+                xc = notch[0] - 1.0 - mp.lip_l / 2
+            out.append(xc)
+        return tuple(out)
 
     def screw_xs(self) -> Tuple[float, float]:
         """Plate screw X positions: near the ends, or just inboard of the end arms."""
@@ -282,7 +300,7 @@ def build_cradle(g: Geometry, with_knuckles: bool = True) -> cq.Workplane:
     z_top = z_lip0 + mp.lip_t
     cradle = _box(x0, x1, -g.wall_out, g.wall_out, g.floor_bot, z_top)
     cradle = cradle.cut(_box(x0 - 1, x1 + 1, -g.wall_in, g.wall_in, -mp.fit, z_top + 1))
-    for xc in mp.lip_x:
+    for xc in g.lip_xs():
         for side in (1, -1):
             lip = _box(xc - mp.lip_l / 2, xc + mp.lip_l / 2, side * g.wall_in, side * (g.hw - mp.lip_in),
                        z_lip0, z_top)
@@ -296,8 +314,14 @@ def build_cradle(g: Geometry, with_knuckles: bool = True) -> cq.Workplane:
     if with_knuckles:
         cradle = cradle.union(_cradle_knuckles(g))
         cradle = cradle.cut(_cradle_pin(g))
+    notch = g.side_notch()
+    if notch:
+        # Open the wall the cable nozzle leaves through, full height
+        x_a, x_b, side = notch
+        cradle = cradle.cut(_box(x_a, x_b, side * (g.wall_in - 0.1), side * (g.wall_out + 20),
+                                 g.floor_bot + mp.floor_t - 0.01, z_top + 1))
     log.debug("Cradle x %.1f..%.1f, walls |y| %.2f..%.2f, lips at %s, knuckles=%s",
-              x0, x1, g.wall_in, g.wall_out, mp.lip_x, with_knuckles)
+              x0, x1, g.wall_in, g.wall_out, g.lip_xs(), with_knuckles)
     return cradle
 
 
@@ -389,7 +413,7 @@ def validate(g: Geometry) -> None:
     log.debug("Cradle wall snap strain %.2f%% (limit %.2f%%)", strain * 100, mp.max_strain * 100)
     if strain > mp.max_strain:
         raise ValueError(f"cradle wall strain {strain:.3f} > {mp.max_strain}")
-    for xc in mp.lip_x:
+    for xc in g.lip_xs():
         if abs(xc - cp.lens_x) - mp.lip_l / 2 < cp.window_d_at(cp.front_gap + cp.lid_t) / 2 + 2:
             raise ValueError(f"lip at x={xc} is next to the lens window")
         if not (g.cradle_x0 <= xc - mp.lip_l / 2 and xc + mp.lip_l / 2 <= g.cradle_x1):
@@ -517,12 +541,16 @@ def print_orient_plate(part: cq.Workplane) -> cq.Workplane:
 
 
 VIEWER_CONFIGS = [
-    # key, label, MountParams overrides, fixed wedge angle (None = hinge, tilt adjustable)
-    ("landscape_above", "Hinge: landscape, camera above the feature", {}, None),
-    ("landscape_below", "Hinge: landscape, camera below the feature (end hinge)", {"mount_side": "below"}, None),
-    ("portrait_above", "Hinge: portrait 9:16, camera above the feature", {"orientation": "portrait"}, None),
-    ("wedge_above_45", "Wedge 45 deg: landscape, above", {}, 45.0),
-    ("wedge_below_45", "Wedge 45 deg: landscape, below", {"mount_side": "below"}, 45.0),
+    # key, label, MountParams overrides, fixed wedge angle (None = hinge), case.Params overrides
+    ("landscape_above", "Hinge: landscape, camera above the feature", {}, None, {}),
+    ("landscape_below", "Hinge: landscape, camera below the feature (end hinge)", {"mount_side": "below"}, None, {}),
+    ("portrait_above", "Hinge: portrait 9:16, above, cable out the top end", {"orientation": "portrait"}, None, {}),
+    ("portrait_above_sideA", "Hinge: portrait 9:16, above, cable out side A (case +Y)", {"orientation": "portrait"},
+     None, {"cable_exit": "side_end", "cable_side": 1}),
+    ("portrait_above_sideB", "Hinge: portrait 9:16, above, cable out side B (case -Y)", {"orientation": "portrait"},
+     None, {"cable_exit": "side_end", "cable_side": -1}),
+    ("wedge_above_45", "Wedge 45 deg: landscape, above", {}, 45.0, {}),
+    ("wedge_below_45", "Wedge 45 deg: landscape, below", {"mount_side": "below"}, 45.0, {}),
 ]
 
 
@@ -559,10 +587,12 @@ def write_viewer_configs(out_dir: str) -> None:
     this checks that formula against the real pose at several tilts before
     writing anything.
     """
-    cp = case.Params()
     meta = {}
-    for key, label, overrides, wedge_angle in VIEWER_CONFIGS:
+    for key, label, overrides, wedge_angle, case_over in VIEWER_CONFIGS:
+        cp = case.Params(**case_over)
+        case.validate(cp)
         g = Geometry(cp, MountParams(**overrides))
+        validate(g)
         m0 = _case_to_world(g, 0.0)
         axis = g.to_world(cq.Workplane().add(cq.Vertex.makeVertex(0, g.axis_Y, g.axis_Z))).val().toTuple()
         for t in (20.0, 45.0, 70.0):
@@ -580,6 +610,16 @@ def write_viewer_configs(out_dir: str) -> None:
         if cradle is not None:
             files["cradle"] = f"viewer_{key}_cradle.stl"
             cq.exporters.export(cradle, os.path.join(out_dir, files["cradle"]), tolerance=0.05, angularTolerance=0.2)
+        if case_over:
+            # This config's case differs from the default one embedded in the viewer
+            base_c = case.build_base(cp)
+            parts = [base_c.val()] + ([case.build_cable_cap(cp).val()] if cp.use_cap else [])
+            files["case_base"] = f"viewer_{key}_case_base.stl"
+            files["case_lid"] = f"viewer_{key}_case_lid.stl"
+            cq.exporters.export(cq.Workplane().add(cq.Compound.makeCompound(parts)),
+                                os.path.join(out_dir, files["case_base"]), tolerance=0.05, angularTolerance=0.2)
+            cq.exporters.export(case.build_lid(cp), os.path.join(out_dir, files["case_lid"]),
+                                tolerance=0.05, angularTolerance=0.2)
         meta[key] = {"label": label, "files": files, "m0": m0, "axis": list(axis),
                      "tilt": wedge_angle if wedge_angle is not None else 45.0,
                      "fixed_tilt": wedge_angle is not None, "plate_h": g.mp.plate_h,
@@ -595,6 +635,8 @@ def main() -> None:
     ap.add_argument("--tilt", type=float, default=45.0, help="hinge pose in the assembly STEP, degrees down")
     ap.add_argument("--viewer", action="store_true", help="write the viewer's configuration meshes and exit")
     ap.add_argument("--orientation", choices=["landscape", "portrait"], default="landscape")
+    ap.add_argument("--cable-exit", choices=["end", "side_end"], default="end", help="case cable exit")
+    ap.add_argument("--cable-side", type=int, choices=[1, -1], default=1, help="side_end: +1 = case +Y wall")
     ap.add_argument("--side", choices=["above", "below"], default="above",
                     help="camera above the feature, or hanging below it (plate mounted upside down)")
     ap.add_argument("--wedge-angle", type=float, default=45.0, help="fixed wedge angle, degrees down")
@@ -607,7 +649,8 @@ def main() -> None:
         os.makedirs(args.out, exist_ok=True)
         write_viewer_configs(args.out)
         return
-    cp, mp = case.Params(), MountParams(orientation=args.orientation, mount_side=args.side)
+    cp = case.Params(cable_exit=args.cable_exit, cable_side=args.cable_side)
+    mp = MountParams(orientation=args.orientation, mount_side=args.side)
     log.debug("Mount parameters: %s", asdict(mp))
     g = Geometry(cp, mp)
     try:
@@ -621,7 +664,8 @@ def main() -> None:
     os.makedirs(args.out, exist_ok=True)
     plate, cradle = build_plate(g), build_cradle(g)
     wedge = build_wedge_mount(g, args.wedge_angle)
-    o = ("" if mp.orientation == "landscape" else "_portrait") + ("" if mp.mount_side == "above" else "_below")
+    o = ("" if mp.orientation == "landscape" else "_portrait") + ("" if mp.mount_side == "above" else "_below") + \
+        ("" if cp.cable_exit == "end" else f"_side{'+Y' if cp.cable_side > 0 else '-Y'}")
     # The plate only changes with the arm (below); the cradle only with orientation
     plate_name = "mount_wall_plate.stl" if mp.mount_side == "above" else f"mount_wall_plate{o}.stl"
     # Cradle knuckles differ by orientation and by side (centre vs end hinge)
