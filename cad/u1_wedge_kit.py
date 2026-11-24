@@ -57,6 +57,10 @@ class KitParams:
     rib_spacing: float = 57.0        # F: rib spacing on the lip's inner face; the plate fits between two ribs
     toolhead_margin: float = 2.0     # extra keep-out around the toolhead
     rib_clear: float = 1.0           # plate clearance to each rib
+    # How much lower the camera hangs (its top end below the lip's bottom edge lets it
+    # tuck back into the gap; costs depth). The viewer compares several.
+    drop: float = 0.0
+    viewer_drops: Tuple[float, ...] = (0.0, 10.0, 20.0)
     # Dovetail rail on the plate (profile in YZ, running along X)
     rail_base_w: float = 8.0         # width at the plate face (Z)
     rail_h: float = 3.0              # height off the plate face (Y)
@@ -108,6 +112,8 @@ class Kit:
                                  floor_t=kp.cradle_floor_t,
                                  tilt_max=0.0, tilt_step=5.0)
         self.g = fm.Geometry(self.cp, self.mp)
+        self.base_axis_Z = self.g.axis_Z
+        self.set_drop(kp.drop)
         self.g.cradle_x0, self.g.cradle_x1 = -(half - self.mp.end_margin), half - self.mp.end_margin
         # The kit plate has no hinge arms: it sits between two ribs on the lip
         hp = kp.rib_spacing / 2 - kp.rib_clear
@@ -121,6 +127,11 @@ class Kit:
         self.key_xs = (self.g.cradle_x0 + kp.key_inset, self.g.cradle_x1 - kp.key_inset)
         log.debug("Cradle x %.2f..%.2f, keys at %s, rail top width %.1f",
                   self.g.cradle_x0, self.g.cradle_x1, self.key_xs, self.rail_top_w)
+
+    def set_drop(self, drop: float) -> None:
+        """Hang the camera `drop` mm lower (the below-mode mount frame is flipped, so +Z there is down)."""
+        self.g.axis_Z = self.base_axis_Z + drop
+        self.drop = drop
 
     # ---------- plate ----------
     def rail(self, grow: float = 0.0, x0=None, x1=None) -> cq.Workplane:
@@ -265,14 +276,37 @@ class Kit:
         # Dovetail slot through the wedge along X
         wedge = wedge.cut(self.rail(grow=kp.rail_clear, x0=-50, x1=50)).cut(pilot)
         # Angle label on the +X side face
-        side = max(wedge.faces(">X").vals(), key=lambda f: f.Area())
-        c = side.Center()
-        txt = (cq.Workplane("YZ", origin=(w + 0.01, 0, 0))
-               .center(c.y, c.z)
-               .text(f"{angle:.0f}", 5.0, -kp.label_depth, kind="bold", combine=False))
-        cut = txt.intersect(wedge)
-        if _vol(cut) < 0.5:
-            raise RuntimeError(f"{angle:.0f} deg wedge: angle label falls outside the wedge face")
+        # Angle label on the +X side face: search a grid over that face for a spot
+        # where the whole label lands on solid material (the slot, the clipped
+        # corners and the face's shape vary with angle and hang depth)
+        def label_at(y, z, size):
+            return (cq.Workplane("YZ", origin=(w + 0.01, y, z))
+                    .text(f"{angle:.0f}", size, -kp.label_depth, kind="bold", combine=False))
+        bb = wedge.val().BoundingBox()
+        txt = None
+        for size in (3.6, 2.8):
+            # Reference: the part of the label behind the face plane (it starts 0.01 mm proud)
+            ref = _vol(label_at(0, 0, size).intersect(_box(-500, w, -500, 500, -500, 500)))
+            y = bb.ymin + 2
+            while y < bb.ymax - 2 and txt is None:
+                z = bb.zmax - 2
+                while z > bb.zmin + 2:
+                    cand = label_at(y, z, size)
+                    try:
+                        got = _vol(cand.intersect(wedge))
+                    except ValueError:      # OCC returns a null shape when they don't overlap at all
+                        got = 0.0
+                    if got > 0.95 * ref:    # >= 95% of the label on material: well inside the face
+                        txt = cand
+                        break
+                    z -= 1.0
+                y += 1.0
+            if txt is not None:
+                break
+        if txt is None:
+            log.warning("%.0f deg wedge (drop %.0f): side face too small for a label; leaving it blank",
+                        angle, self.drop)
+            return wedge.clean()
         wedge = wedge.cut(txt).clean()
         if len(wedge.solids().vals()) != 1 or not wedge.val().isValid():
             log.debug("%.0f deg wedge solids: %s", angle,
@@ -372,13 +406,14 @@ def main() -> None:
                     help="cover face below the lip, deg from vertical (ASSUMED until measured)")
     ap.add_argument("--gap", type=float, default=KitParams.below_gap,
                     help="open gap behind the lip plane under its bottom edge, mm (ASSUMED until measured)")
+    ap.add_argument("--drop", type=float, default=KitParams.drop, help="hang the camera this much lower, mm")
     ap.add_argument("--viewer", action="store_true", help="also write viewer meshes + viewer_kit.json")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"),
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
     logging.basicConfig(level=args.log_level, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         datefmt="%Y-%m-%dT%H:%M:%S%z")
-    kp = KitParams(angles=tuple(args.angles), below_slope_deg=args.slope, below_gap=args.gap)
+    kp = KitParams(angles=tuple(args.angles), below_slope_deg=args.slope, below_gap=args.gap, drop=args.drop)
     log.debug("Kit parameters: %s", asdict(kp))
     kit = Kit(kp)
     plate, cradle = kit.build_plate(), kit.build_cradle()
@@ -399,7 +434,7 @@ def main() -> None:
     self_check(kit, wedges, placements, plate, cradle)
 
     os.makedirs(args.out, exist_ok=True)
-    tag = f"gap{kp.below_gap:.0f}_slope{kp.below_slope_deg:.0f}"
+    tag = f"gap{kp.below_gap:.0f}_slope{kp.below_slope_deg:.0f}" + ("" if kp.drop == 0 else f"_drop{kp.drop:.0f}")
     files = {"kit_wall_plate.stl": Kit.print_back_down(plate, 0.0),
              "kit_cradle_universal.stl": kit.print_cradle(cradle)}
     for a, w in wedges.items():
@@ -410,10 +445,22 @@ def main() -> None:
         log.info("Wrote %s", path)
 
     if args.viewer:
-        write_viewer(kit, wedges, placements, plate, cradle, args.out)
+        by_drop = {}
+        for d in kp.viewer_drops:
+            kit.set_drop(d)
+            pl, wd = {}, {}
+            for a in kp.angles:
+                try:
+                    pl[a] = kit.place(a, parts)
+                except RuntimeError as e:
+                    log.warning("Viewer: drop %.0f, %.0f deg skipped: %s", d, a, e)
+                    continue
+                wd[a] = kit.build_wedge(a)
+            by_drop[d] = (wd, pl)
+        write_viewer(kit, by_drop, plate, cradle, args.out)
 
 
-def write_viewer(kit: Kit, wedges, placements, plate, cradle, out: str) -> None:
+def write_viewer(kit: Kit, by_drop, plate, cradle, out: str) -> None:
     """
     Viewer data: shared meshes (plate, cradle, 3 case variants) plus one wedge
     per angle, and one config per angle x case variant x way round. Each config
@@ -426,8 +473,9 @@ def write_viewer(kit: Kit, wedges, placements, plate, cradle, out: str) -> None:
         solids = [base] + ([case.build_cable_cap(v).val()] if v.use_cap else [])
         files[f"case_{vname}_base"] = cq.Workplane().add(cq.Compound.makeCompound(solids))
         files[f"case_{vname}_lid"] = case.build_lid(v)
-    for a, w in wedges.items():
-        files[f"wedge_{a:.0f}"] = w
+    for d, (wd, _) in by_drop.items():
+        for a, w in wd.items():
+            files[f"wedge_{a:.0f}_d{d:.0f}"] = w
     names = {}
     for k, shape in files.items():
         fn = f"viewer_kit_{k.replace('+', 'p').replace('-', 'm')}.stl"
@@ -446,16 +494,20 @@ def write_viewer(kit: Kit, wedges, placements, plate, cradle, out: str) -> None:
         return f"{vert} corner, {'+X' if p_[0] > lens[0] else '-X'} side"
 
     configs = {}
-    for a in wedges:
+    for d, (wd, placements) in by_drop.items():
+      kit.set_drop(d)
+      for a in wd:
         g.axis_Y = placements[a]
         m0 = fm._case_to_world(g, a)
+        low = min(g.to_world(g.pose(p, a)).val().BoundingBox().zmin for p in kit.moving_parts())   # cradle + every case envelope
         for vname in kit.variants:
             for rot in (0, 180):
-                key = f"w{a:.0f}_{vname}_{rot}".replace("+", "p").replace("-", "m")
+                key = f"w{a:.0f}_d{d:.0f}_{vname}_{rot}".replace("+", "p").replace("-", "m")
                 configs[key] = {
                     "label": f"Wedge {a:.0f}° · cable {exit_label(vname, rot, a)}",
                     "angle": a, "m0": m0, "case_rot": rot,
-                    "fixed": [names["plate"], names[f"wedge_{a:.0f}"]], "cradle": names["cradle"],
+                    "fixed": [names["plate"], names[f"wedge_{a:.0f}_d{d:.0f}"]], "cradle": names["cradle"],
+                    "drop": d, "lowest_z": low,
                     "case_base": names[f"case_{vname}_base"], "case_lid": names[f"case_{vname}_lid"],
                     "upside_down": rot == 180, "slope": kit.kp.below_slope_deg, "gap": kit.kp.below_gap,
                     "toolhead": [kit.kp.toolhead_dy, kit.kp.toolhead_dz],
