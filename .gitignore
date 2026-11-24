@@ -3,3 +3,5 @@ out16/
 __pycache__/
 *.pyc
 .DS_Store
+session-state.md
+CLAUDE.local.md
