@@ -60,7 +60,7 @@ class KitParams:
     # How much lower the camera hangs (its top end below the lip's bottom edge lets it
     # tuck back into the gap; costs depth). The viewer compares several.
     drop: float = 0.0
-    viewer_drops: Tuple[float, ...] = (0.0, 10.0, 20.0)
+    viewer_drops: Tuple[float, ...] = (0.0,)   # raising/lowering was compared and dropped (Charles: keep position)
     # Dovetail rail on the plate (profile in YZ, running along X)
     rail_base_w: float = 8.0         # width at the plate face (Z)
     rail_h: float = 3.0              # height off the plate face (Y)
@@ -94,6 +94,40 @@ def _vol(w: cq.Workplane) -> float:
     return sum(s.Volume() for s in w.solids().vals())
 
 
+def _clean(w: cq.Workplane) -> cq.Workplane:
+    """Merge coplanar faces when OCC can; some lofted/cut shapes make its upgrader fail, keep them as is."""
+    try:
+        return w.clean()
+    except Exception as e:      # OCP Standard_Failure (zero-norm normal) has no narrower Python type
+        log.debug("clean() skipped: %s", e)
+        return w
+
+
+def _convex_hull(points: List[cq.Vector]) -> cq.Solid:
+    """Convex hull solid of 3D points (scipy for the facets, OCC for the solid)."""
+    from scipy.spatial import ConvexHull
+    pts = [(p.x, p.y, p.z) for p in points]
+    hull = ConvexHull(pts)
+    faces = []
+    for simplex, eq in zip(hull.simplices, hull.equations):
+        tri = [cq.Vector(*pts[i]) for i in simplex]
+        # Orient each triangle outward (scipy's facet normal is eq[:3])
+        n = (tri[1] - tri[0]).cross(tri[2] - tri[0])
+        if n.dot(cq.Vector(*eq[:3])) < 0:
+            tri = [tri[0], tri[2], tri[1]]
+        faces.append(cq.Face.makeFromWires(cq.Wire.makePolygon(tri, close=True)))
+    solid = cq.Solid.makeSolid(cq.Shell.makeShell(faces)).fix()
+    return solid
+
+
+def _ivol(a: cq.Workplane, b: cq.Workplane) -> float:
+    """Overlap volume; OCC returns a null shape (ValueError) when two solids don't touch at all."""
+    try:
+        return _vol(a.intersect(b))
+    except ValueError:
+        return 0.0
+
+
 class Kit:
     """Derived geometry shared by builders and checks."""
 
@@ -124,7 +158,9 @@ class Kit:
             raise ValueError(f"plate_h {self.mp.plate_h} is taller than the lip ({kp.lip_h})")
         self.rail_c = self.mp.plate_h / 2
         self.rail_top_w = kp.rail_base_w + 2 * kp.rail_h / math.tan(math.radians(kp.rail_flank_deg))
-        self.key_xs = (self.g.cradle_x0 + kp.key_inset, self.g.cradle_x1 - kp.key_inset)
+        # Key pockets at both ends and the middle: the wedge attaches at whichever is nearest the rail,
+        # so a raised camera is held further down its case
+        self.key_xs = (self.g.cradle_x0 + kp.key_inset, 0.0, self.g.cradle_x1 - kp.key_inset)
         log.debug("Cradle x %.2f..%.2f, keys at %s, rail top width %.1f",
                   self.g.cradle_x0, self.g.cradle_x1, self.key_xs, self.rail_top_w)
 
@@ -206,7 +242,7 @@ class Kit:
 
         def clear(ay: float) -> bool:
             g.axis_Y = ay
-            return all(_vol(world(g.pose(p, angle)).intersect(cover_w)) < 1e-3 for p in parts)
+            return all(_ivol(world(g.pose(p, angle)), cover_w) < 1e-3 for p in parts)
 
         lo = self.mp.plate_t + kp.rail_h + kp.lip_gap
         # Moving out from the lip first frees the cover, then (further out) runs into the
@@ -242,7 +278,13 @@ class Kit:
         # Face B: pad on the cradle floor's outer plane around the upper key. Case -X
         # is up in portrait-below; pair corners by their world position: A's top edge
         # with the pad's upper edge, bottom with lower, -X with -X.
-        xk, hp = self.key_xs[0], kp.pad_w / 2
+        hp = kp.pad_w / 2
+
+        # Long pad from the top pocket to the middle pocket: two keys, two M3 screws,
+        # ~3x the contact area of one key and no twist (Charles's call)
+        x_top, x_mid = self.key_xs[0], self.key_xs[1]
+        xk = (x_top + x_mid) / 2
+        hp = (x_mid - x_top) / 2 + kp.pad_w / 2
 
         def pad(x, y):
             v = g.to_world(g.pose(cq.Workplane().add(cq.Vertex.makeVertex(x, y, g.floor_bot)), angle)).val()
@@ -252,10 +294,14 @@ class Kit:
         upper = sorted([pad(xk - hp, -w), pad(xk - hp, w)], key=lambda v: v.x)
         if not (upper[0].z > lower[0].z):
             raise RuntimeError(f"{angle:.0f} deg: expected the case -X end to be up in portrait-below")
+        log.debug("%.0f deg, drop %.0f: wedge attaches at cradle pocket x=%.1f", angle, self.drop, xk)
         b_ord = [lower[0], lower[1], upper[1], upper[0]]   # matches A: (-X,bottom) (+X,bottom) (+X,top) (-X,top)
-        wire_a = cq.Wire.makePolygon(a_pts, close=True)
-        wire_b = cq.Wire.makePolygon(b_ord, close=True)
-        hull = cq.Workplane().add(cq.Solid.makeLoft([wire_a, wire_b], True))
+        # Convex hull of the 8 corners: always a valid solid. A ruled loft between the two
+        # faces twists (self-intersects) when the long pad's edges pair up badly.
+        loft = _convex_hull(a_pts + b_ord)
+        if loft.Volume() <= 0 or not loft.isValid():
+            raise RuntimeError(f"{angle:.0f} deg wedge: hull is invalid (volume {loft.Volume():.1f})")
+        hull = cq.Workplane().add(loft)
         # At shallow angles the pad's lower edge tucks behind the lip face: keep the
         # wedge out of the plate slab and the cover
         # Rail carrier: a solid block that wraps the dovetail with carrier_wall all round,
@@ -263,51 +309,61 @@ class Kit:
         y_car = mp.plate_t + kp.rail_h + kp.rail_clear + kp.carrier_wall
         carrier = _box(-w, w, mp.plate_t, y_car, za0, za1)
         hull = hull.union(carrier)
-        hull = hull.cut(_box(-500, 500, -100, mp.plate_t, 0, mp.plate_h)).cut(g.to_world(g.cover())).clean()
+        hull = hull.cut(_box(-500, 500, -100, mp.plate_t, 0, mp.plate_h)).cut(g.to_world(g.cover()))
+        hull = _clean(hull)
         # Key on face B, pilot hole into it
         kw = kp.key_w / 2
-        key_local = _box(xk - kw, xk + kw, -kw, kw, g.floor_bot - 0.01, g.floor_bot + kp.key_h)
-        pilot_local = cq.Workplane().add(cq.Solid.makeCylinder(
-            kp.pilot_d / 2, kp.pilot_depth, pnt=cq.Vector(xk, 0, g.floor_bot + kp.key_h + 0.01),
-            dir=cq.Vector(0, 0, -1)))
+        key_local, pilots_local = None, []
+        for xp in (x_top, x_mid):
+            kb = _box(xp - kw, xp + kw, -kw, kw, g.floor_bot - 0.01, g.floor_bot + kp.key_h)
+            pb = cq.Workplane().add(cq.Solid.makeCylinder(
+                kp.pilot_d / 2, kp.pilot_depth, pnt=cq.Vector(xp, 0, g.floor_bot + kp.key_h + 0.01),
+                dir=cq.Vector(0, 0, -1)))
+            key_local = kb if key_local is None else key_local.union(kb)
+            pilots_local.append(pb)
         key = g.to_world(g.pose(key_local, angle))
-        pilot = g.to_world(g.pose(pilot_local, angle))
-        wedge = hull.union(key)
+        pilots = [g.to_world(g.pose(pb, angle)) for pb in pilots_local]
+        # Drill the body first, then add pre-drilled keys: drilling after the union
+        # makes OCC return a null shape at some angles
+        body = hull
+        for pb in pilots:
+            body = body.cut(pb)
+        for pb in pilots:
+            key = key.cut(pb)
+        wedge = body.union(key)
         # Dovetail slot through the wedge along X
-        wedge = wedge.cut(self.rail(grow=kp.rail_clear, x0=-50, x1=50)).cut(pilot)
+        wedge = wedge.cut(self.rail(grow=kp.rail_clear, x0=-50, x1=50))
+
         # Angle label on the +X side face
         # Angle label on the +X side face: search a grid over that face for a spot
         # where the whole label lands on solid material (the slot, the clipped
         # corners and the face's shape vary with angle and hang depth)
         def label_at(y, z, size):
             return (cq.Workplane("YZ", origin=(w + 0.01, y, z))
-                    .text(f"{angle:.0f}", size, -kp.label_depth, kind="bold", combine=False))
-        bb = wedge.val().BoundingBox()
+                    .text(f"{angle:.0f}", size, -kp.label_depth, kind="bold", combine=False, clean=False))
+        # Candidate spots on the largest +X face, nearest its centre first (a whole-bbox
+        # grid made the build take >10 min)
+        side = max(wedge.faces(">X").vals(), key=lambda f: f.Area())
+        fb, fc = side.BoundingBox(), side.Center()
+        cands = [(fb.ymin + 2 + i * 1.5, fb.zmin + 2 + j * 1.5)
+                 for i in range(int((fb.ylen - 4) / 1.5) + 1) for j in range(int((fb.zlen - 4) / 1.5) + 1)]
+        cands.sort(key=lambda c: (c[0] - fc.y) ** 2 + (c[1] - fc.z) ** 2)
         txt = None
         for size in (3.6, 2.8):
             # Reference: the part of the label behind the face plane (it starts 0.01 mm proud)
             ref = _vol(label_at(0, 0, size).intersect(_box(-500, w, -500, 500, -500, 500)))
-            y = bb.ymin + 2
-            while y < bb.ymax - 2 and txt is None:
-                z = bb.zmax - 2
-                while z > bb.zmin + 2:
-                    cand = label_at(y, z, size)
-                    try:
-                        got = _vol(cand.intersect(wedge))
-                    except ValueError:      # OCC returns a null shape when they don't overlap at all
-                        got = 0.0
-                    if got > 0.95 * ref:    # >= 95% of the label on material: well inside the face
-                        txt = cand
-                        break
-                    z -= 1.0
-                y += 1.0
+            for y, z in cands[:120]:
+                cand = label_at(y, z, size)
+                if _ivol(cand, wedge) > 0.95 * ref:   # >= 95% of the label on material
+                    txt = cand
+                    break
             if txt is not None:
                 break
         if txt is None:
             log.warning("%.0f deg wedge (drop %.0f): side face too small for a label; leaving it blank",
                         angle, self.drop)
-            return wedge.clean()
-        wedge = wedge.cut(txt).clean()
+            return _clean(wedge)
+        wedge = _clean(wedge.cut(txt))
         if len(wedge.solids().vals()) != 1 or not wedge.val().isValid():
             log.debug("%.0f deg wedge solids: %s", angle,
                       [(round(s_.Volume(), 1), s_.isValid()) for s_ in wedge.solids().vals()])
@@ -344,11 +400,11 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
         parts = [case.build_base(v), case.build_lid(v)] + ([case.build_cable_cap(v)] if v.use_cap else [])
         for rot in (0, 180):
             for p in parts:
-                vol = _vol(cradle.intersect(p.rotate((0, 0, 0), (0, 0, 1), rot)))
+                vol = _ivol(cradle, p.rotate((0, 0, 0), (0, 0, 1), rot))
                 if vol > 1e-3:
                     raise RuntimeError(f"cradle interferes with the {vname} case at {rot} deg ({vol:.3f} mm^3)")
     rays = case.build_ray_envelope(case.Params(), 40.0)
-    if _vol(cradle.intersect(rays)) > 1e-3:
+    if _ivol(cradle, rays) > 1e-3:
         raise RuntimeError("cradle vignettes the camera")
     cover_w = g.to_world(g.cover())
     plate_body = kit.g_plate_body()
@@ -361,23 +417,29 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
             raise RuntimeError(f"{a:.0f} deg: lens points {d}, expected {want}")
         th = kit.toolhead()
         for part in [kit.build_cradle()] + kit.moving_parts()[1:]:
-            if _vol(g.to_world(g.pose(part, a)).intersect(th)) > 1e-3:
+            if _ivol(g.to_world(g.pose(part, a)), th) > 1e-3:
                 raise RuntimeError(f"{a:.0f} deg: the camera or cradle reaches the toolhead keep-out")
-        if _vol(wedge.intersect(th)) > 1e-3:
+        if _ivol(wedge, th) > 1e-3:
             raise RuntimeError(f"{a:.0f} deg wedge reaches the toolhead keep-out")
-        if _vol(wedge.intersect(cover_w)) > 1e-3 or _vol(wedge.intersect(plate_body)) > 1e-3:
+        if _ivol(wedge, cover_w) > 1e-3 or _ivol(wedge, plate_body) > 1e-3:
             raise RuntimeError(f"{a:.0f} deg wedge runs into the cover or plate")
-        if _vol(wedge.intersect(plate)) > 1e-3:
+        if _ivol(wedge, plate) > 1e-3:
             raise RuntimeError(f"{a:.0f} deg wedge interferes with the rail")
         # The slot must be fully enclosed by wedge material around the rail
         hull_band = wedge.union(kit.rail(grow=kp.rail_clear, x0=-g.wall_out, x1=g.wall_out))
-        if abs(_vol(hull_band.intersect(rail_env)) - _vol(rail_env)) > 0.01 * _vol(rail_env):
+        # Rail volume NOT covered by wedge+slot must be ~0 (an intersection's volume can
+        # double-count overlapping pieces, so measure what's left over instead)
+        try:
+            uncovered = _vol(rail_env.cut(hull_band))
+        except ValueError:
+            uncovered = 0.0
+        if uncovered > 0.01 * _vol(rail_env):
             raise RuntimeError(f"{a:.0f} deg wedge does not surround the rail")
         posed_cradle = g.to_world(g.pose(cradle, a))
-        if _vol(wedge.intersect(posed_cradle)) > 1e-3:
+        if _ivol(wedge, posed_cradle) > 1e-3:
             raise RuntimeError(f"{a:.0f} deg wedge interferes with the cradle")
         for part in kit.moving_parts()[1:]:
-            if _vol(g.to_world(g.pose(part, a)).intersect(wedge)) > 1e-3:
+            if _ivol(g.to_world(g.pose(part, a)), wedge) > 1e-3:
                 raise RuntimeError(f"{a:.0f} deg wedge interferes with a case")
     printables = {"plate": Kit.print_back_down(plate, 0.0), "cradle": kit.print_cradle(cradle)}
     printables.update({f"wedge {a:.0f}": kit.print_wedge(w) for a, w in wedges.items()})
@@ -390,7 +452,10 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
         if name == "cradle":
             # Key-pocket ceilings are flat 10 mm bridges (printable); lips are 1 mm catches
             pocket = kp.key_w + 2 * kp.key_clear
-            allowed = 2 * pocket ** 2 + 4 * mp.lip_l * (mp.lip_in + mp.fit) + 10.0
+            allowed = len(kit.key_xs) * pocket ** 2 + 4 * mp.lip_l * (mp.lip_in + mp.fit) + 10.0
+        if name.startswith("wedge"):
+            # Printed on its side, each key's underside is a short (key_h) overhang
+            allowed = kp.max_overhang_area + 2 * kp.key_w * kp.key_h
         log.debug("Overhang %s: %.1f mm^2 (allowed %.0f)", name, area, allowed)
         if area > allowed:
             raise RuntimeError(f"{name}: {area:.0f} mm^2 of >45 deg overhang")
