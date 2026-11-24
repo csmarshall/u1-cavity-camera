@@ -69,6 +69,17 @@ class MountParams:
     #          lower end toward the wall, so the plate knuckle stands off on an
     #          arm whose length is derived from the tilt range (never hand-set).
     mount_side: str = "above"
+    # Portrait: which case end the hinge sits at. -1 = the -X end (connector end
+    # up), +1 = the +X end (connector end down; the picture is upside down, so
+    # set Mainsail's flip H + V). With the cable side (case +/-Y) this picks
+    # any of the 4 corners for the cable.
+    hinge_end: int = -1
+
+    # --- Cover below the feature (MEASURE) ---
+    # The lip is vertical; below it the cover's inner face slopes outward (away
+    # from the printer) at this angle from vertical, so a camera hanging below
+    # can tuck back under the lip. 0 = treat it as a vertical wall (conservative).
+    below_slope_deg: float = 0.0
 
     # --- Hinge ---
     knuckle_r: float = 4.0        # outer radius of every knuckle
@@ -149,7 +160,7 @@ class Geometry:
         # Hinge axis in case coordinates, knuckle tangent to the floor plane (the print bed).
         # Landscape: along case X beside the +Y wall. Portrait: along case Y past the -X end.
         self.axis_y = self.wall_out + self.attach
-        self.axis_x = cp.out_x0 - self.attach
+        self.axis_x = (cp.out_x0 - self.attach) if mp.hinge_end < 0 else (cp.out_x1 + self.attach)
         self.axis_z = self.floor_bot + mp.knuckle_r
         self.cradle_x0 = cp.out_x0 + mp.end_margin
         self.cradle_x1 = cp.out_x1 - mp.end_margin
@@ -161,7 +172,10 @@ class Geometry:
             raise ValueError("portrait + below is not supported: the hinge arm would have to stand "
                              "~100 mm off the wall. Use portrait above, or landscape below.")
         self.sign = 1.0 if mp.mount_side == "above" else -1.0
-        self.axis_Z = mp.hinge_z
+        # The hinge sits hinge_z from the plate edge nearest the camera: the bottom edge
+        # for "above"; for "below" the mount frame is flipped, so measure from the top
+        # (world bottom), letting the camera hang clear of the lip and tuck under it
+        self.axis_Z = mp.hinge_z if mp.mount_side == "above" else mp.plate_h - mp.hinge_z
         # Hinge axis distance from the wall: knuckles clear the plate face by swing_gap,
         # and for "below" the whole swept camera must clear it too
         self.axis_Y = mp.plate_t + mp.knuckle_r + mp.swing_gap
@@ -193,19 +207,53 @@ class Geometry:
                 "cradle": [(-c0 - mp.cradle_knuckle_w, -c0), (c0, c0 + mp.cradle_knuckle_w)]}
 
     def _swept_standoff(self) -> float:
-        """Axis distance from the wall so the cradle and case clear the plate over the whole tilt range."""
-        saved, self.axis_Y = getattr(self, "axis_Y", 0.0), 0.0
+        """
+        Smallest axis distance from the wall at which the cradle and case clear the
+        plate face and the cover over the whole tilt range. Upper bound from swept
+        bounding boxes against a vertical wall; then bisect against the real cover
+        (which lets the camera tuck under a sloping face below the lip).
+        """
+        mp = self.mp
         parts = [build_cradle(self)] + [case.build_base(self.cp), case.build_lid(self.cp)]
         if self.cp.use_cap:
             parts.append(case.build_cable_cap(self.cp))
-        min_y, t = 0.0, 0.0
-        while t <= self.mp.tilt_max + 1e-9:
-            for part in parts:
-                min_y = min(min_y, self.pose(part, t).val().BoundingBox().ymin)
-            t += self.mp.tilt_step
-        self.axis_Y = saved
-        # Bounding boxes of rotated solids are conservative, so this never under-sizes the arm
-        return self.mp.plate_t + self.mp.swing_gap - min_y
+        tilts = []
+        t = 0.0
+        while t <= mp.tilt_max + 1e-9:
+            tilts.append(t)
+            t += mp.tilt_step
+        self.axis_Y = 0.0
+        min_y = min(self.pose(p_, t).val().BoundingBox().ymin for p_ in parts for t in tilts)
+        hi = mp.plate_t + mp.swing_gap - min_y
+        lo = mp.plate_t + mp.knuckle_r + mp.swing_gap
+        if mp.below_slope_deg <= 0:
+            return hi
+        # In the mount frame the plate face is the slab Y in [0, plate_t] over the plate's Z range
+        face = _box(-500, 500, -1, mp.plate_t + mp.swing_gap, 0, mp.plate_h)
+        obstacles = face.union(self.cover())
+
+        def clear(axis_y: float) -> bool:
+            self.axis_Y = axis_y
+            return all(_vol(self.pose(p_, t).intersect(obstacles)) < 1e-3 for t in tilts for p_ in parts)
+
+        if clear(lo):
+            return lo
+        for _ in range(7):
+            mid = (lo + hi) / 2
+            lo, hi = (lo, mid) if clear(mid) else (mid, hi)
+        return hi + 0.2
+
+    def cover(self) -> cq.Workplane:
+        """
+        The printer's cover around the mount, in the MOUNT frame: solid behind the
+        lip face (world Y<0) over the lip and above it, and below the lip behind a
+        face that slopes outward at below_slope_deg. Everything the mount moves must
+        stay out of it.
+        """
+        mp = self.mp
+        lip_and_above = _box(-500, 500, -100, 0, 0, 500)
+        below = _box(-500, 500, -500, 0, -500, 0.01).rotate((0, 0, 0), (1, 0, 0), -mp.below_slope_deg)
+        return self.to_world(lip_and_above.union(below))   # to_world is its own inverse
 
     def side_notch(self):
         """side_end cable exit: (x0, x1, side) of the cradle-wall notch the nozzle passes through, else None."""
@@ -243,10 +291,15 @@ class Geometry:
     def pose(self, shape: cq.Workplane, tilt_deg: float) -> cq.Workplane:
         """Case/cradle frame -> world at the given tilt (rotation about the hinge axis)."""
         if self.mp.orientation == "portrait":
-            # Case +X -> world +Z (stood on its -X end), +Y -> world +X, +Z -> world +Y
-            s = shape.rotate((0, 0, 0), (1, 1, 1), -120)
-            # Axis point (x=axis_x, z=axis_z) now sits at (Y=axis_z, Z=axis_x)
-            s = s.translate((0, self.axis_Y - self.axis_z, self.axis_Z - self.axis_x))
+            s = shape
+            if self.mp.hinge_end > 0:
+                # Stand on the +X end instead: turn the case end for end first
+                s = s.rotate((0, 0, 0), (0, 0, 1), 180)
+            # Case +X -> world +Z (stood on its end), +Y -> world +X, +Z -> world +Y
+            s = s.rotate((0, 0, 0), (1, 1, 1), -120)
+            # Axis point (x=+/-axis_x, z=axis_z) now sits at (Y=axis_z, Z=+/-axis_x)
+            ax = -self.axis_x if self.mp.hinge_end > 0 else self.axis_x
+            s = s.translate((0, self.axis_Y - self.axis_z, self.axis_Z - ax))
         else:
             # Case +Z -> world +Y (lens into the printer), case +Y -> world -Z (down)
             s = shape.rotate((0, 0, 0), (1, 0, 0), -90)
@@ -331,8 +384,9 @@ def _to_case(g: Geometry, block: cq.Workplane) -> cq.Workplane:
     the cradle body (the knuckle's far side), w = case +Z; axis at the origin.
     """
     if g.mp.orientation == "portrait":
-        # u -> case +Y, v -> case -X (past the -X end)
-        return block.rotate((0, 0, 0), (0, 0, 1), 90).translate((g.axis_x, 0, g.axis_z))
+        # u -> case +/-Y, v -> past whichever end the hinge is at
+        angle = 90 if g.mp.hinge_end < 0 else -90
+        return block.rotate((0, 0, 0), (0, 0, 1), angle).translate((g.axis_x, 0, g.axis_z))
     # u -> case +X, v -> case +Y (beside the +Y wall)
     return block.translate((0, g.axis_y, g.axis_z))
 
@@ -398,6 +452,12 @@ def validate(g: Geometry) -> None:
         raise ValueError("knuckle wall around the pin is under 0.8 mm")
     if mp.orientation not in ("landscape", "portrait"):
         raise ValueError("orientation must be 'landscape' or 'portrait'")
+    if mp.hinge_end not in (-1, 1):
+        raise ValueError("hinge_end must be -1 or +1")
+    if mp.hinge_end > 0 and cp.cable_exit == "end":
+        raise ValueError("hinge at the +X end needs a side cable exit: the end nozzle is there")
+    if mp.below_slope_deg < 0 or mp.below_slope_deg >= 80:
+        raise ValueError("below_slope_deg must be in [0, 80)")
     if mp.mount_side not in ("above", "below"):
         raise ValueError("mount_side must be 'above' or 'below'")
     for sx in g.screw_xs():
@@ -483,17 +543,18 @@ def self_check(g: Geometry, wedge_angle: float) -> None:
         if max(abs(a - b) for a, b in zip(d, want)) > 1e-6:
             raise RuntimeError(f"pose sign wrong at tilt {t}: lens dir {d}, expected {want}")
     # Long axis at tilt 0: landscape along the wall; portrait up ("above") or down ("below")
-    want_long = (0.0, 0.0, g.sign) if mp.orientation == "portrait" else (g.sign, 0.0, 0.0)
+    want_long = ((0.0, 0.0, -g.sign * mp.hinge_end) if mp.orientation == "portrait"
+                 else (g.sign, 0.0, 0.0))
     d = g.world_dir((1, 0, 0), 0.0)
     if max(abs(a - b) for a, b in zip(d, want_long)) > 1e-6:
         raise RuntimeError(f"{mp.orientation}: case long axis points {d}, expected {want_long}")
     # Collision sweep: cradle + case vs plate, and nothing behind the wall plane
-    wall = _box(-500, 500, -50, 0, -500, 500)
+    wall = g.cover()
     t = 0.0
     while t <= mp.tilt_max + 1e-9:
         moving = [g.pose(cradle, t)] + [g.pose(p, t) for p in case_parts]
         for i, m in enumerate(moving):
-            for name, fixed in (("plate", plate), ("wall", wall)):
+            for name, fixed in (("plate", plate), ("cover", wall)):
                 v = _vol(m.intersect(fixed))
                 if v > 1e-3:
                     raise RuntimeError(f"tilt {t:.0f}: moving part {i} hits the {name} ({v:.3f} mm^3)")
@@ -636,6 +697,10 @@ def main() -> None:
     ap.add_argument("--viewer", action="store_true", help="write the viewer's configuration meshes and exit")
     ap.add_argument("--orientation", choices=["landscape", "portrait"], default="landscape")
     ap.add_argument("--cable-exit", choices=["end", "side_end"], default="end", help="case cable exit")
+    ap.add_argument("--hinge-end", type=int, choices=[-1, 1], default=-1,
+                    help="portrait: hinge at the case -X end (-1) or +X end (+1, picture upside down)")
+    ap.add_argument("--below-slope", type=float, default=0.0,
+                    help="cover face below the lip, degrees outward from vertical (MEASURE; 0 = vertical wall)")
     ap.add_argument("--cable-side", type=int, choices=[1, -1], default=1, help="side_end: +1 = case +Y wall")
     ap.add_argument("--side", choices=["above", "below"], default="above",
                     help="camera above the feature, or hanging below it (plate mounted upside down)")
@@ -650,7 +715,8 @@ def main() -> None:
         write_viewer_configs(args.out)
         return
     cp = case.Params(cable_exit=args.cable_exit, cable_side=args.cable_side)
-    mp = MountParams(orientation=args.orientation, mount_side=args.side)
+    mp = MountParams(orientation=args.orientation, mount_side=args.side, hinge_end=args.hinge_end,
+                     below_slope_deg=args.below_slope)
     log.debug("Mount parameters: %s", asdict(mp))
     g = Geometry(cp, mp)
     try:
@@ -665,7 +731,8 @@ def main() -> None:
     plate, cradle = build_plate(g), build_cradle(g)
     wedge = build_wedge_mount(g, args.wedge_angle)
     o = ("" if mp.orientation == "landscape" else "_portrait") + ("" if mp.mount_side == "above" else "_below") + \
-        ("" if cp.cable_exit == "end" else f"_side{'+Y' if cp.cable_side > 0 else '-Y'}")
+        ("" if cp.cable_exit == "end" else f"_side{'+Y' if cp.cable_side > 0 else '-Y'}") + \
+        ("" if mp.hinge_end < 0 else "_hingeX+") + ("" if mp.below_slope_deg == 0 else f"_slope{mp.below_slope_deg:.0f}")
     # The plate only changes with the arm (below); the cradle only with orientation
     plate_name = "mount_wall_plate.stl" if mp.mount_side == "above" else f"mount_wall_plate{o}.stl"
     # Cradle knuckles differ by orientation and by side (centre vs end hinge)
