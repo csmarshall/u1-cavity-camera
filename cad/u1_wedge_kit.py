@@ -151,6 +151,7 @@ class Kit:
         self.base_axis_Z = self.g.axis_Z
         self.set_drop(kp.drop)
         self.shift = 0.0                              # camera slid up its own axis, mm (custom pose only)
+        self.half_w = None                            # wedge half-width (world X); None = the cradle's, g.wall_out
         self.g.cradle_x0, self.g.cradle_x1 = -(half - self.mp.end_margin), half - self.mp.end_margin
         # The kit plate has no hinge arms: it sits between two ribs on the lip
         hp = kp.rib_spacing / 2 - kp.rib_clear
@@ -171,6 +172,11 @@ class Kit:
         """Hang the camera `drop` mm lower (the below-mode mount frame is flipped, so +Z there is down)."""
         self.g.axis_Z = self.base_axis_Z + drop
         self.drop = drop
+
+    @property
+    def wedge_hw(self) -> float:
+        """Wedge half-width: the cradle's for the kit, the case's for the cradle-free mount (flat sides either way)."""
+        return self.g.wall_out if self.half_w is None else self.half_w
 
     def posed(self, part: cq.Workplane, angle: float) -> cq.Workplane:
         """
@@ -313,7 +319,7 @@ class Kit:
     def build_wedge(self, angle: float) -> cq.Workplane:
         """Wedge for `angle` in world coordinates (call place() first)."""
         kp, mp, g = self.kp, self.mp, self.g
-        w = g.wall_out
+        w = self.wedge_hw
         # Face A on the plate front, tall enough to swallow the rail
         za0 = self.rail_c - self.rail_top_w / 2 - 2.0
         za1 = self.rail_c + self.rail_top_w / 2 + 2.0
@@ -414,6 +420,34 @@ class Kit:
                       [(round(s_.Volume(), 1), s_.isValid()) for s_ in wedge.solids().vals()])
         return wedge
 
+    # ---------- direct mount (no cradle) ----------
+    def direct_params(self, vname: str) -> case.Params:
+        """
+        Case variant for mounting the wedge straight to the case back. The floor grows by the
+        cradle's fit + floor, so the case's outer floor lands exactly on the cradle's old outer
+        face (g.floor_bot) and the lens stays where the pose put it; the extra floor holds the
+        key pockets and the flush M3 heads the cradle floor used to.
+        """
+        return replace(self.variants[vname], floor=self.variants[vname].floor + self.mp.fit + self.mp.floor_t)
+
+    def to_mount_frame(self, part: cq.Workplane, rot: int = 0) -> cq.Workplane:
+        """Case part (outer floor at Z=0) -> mount frame (outer floor at g.floor_bot), turned `rot` deg about the lens axis."""
+        return part.rotate((0, 0, 0), (0, 0, 1), rot).translate((0, 0, self.g.floor_bot))
+
+    def build_direct_base(self, vname: str) -> cq.Workplane:
+        """Thick-floor base with a key pocket and a flush countersunk M3 at every key_xs (symmetric: either way up)."""
+        kp, p = self.kp, self.direct_params(vname)
+        base = case.build_base(p)
+        kw = kp.key_w / 2 + kp.key_clear
+        for xk in self.key_xs:
+            base = base.cut(_box(xk - kw, xk + kw, -kw, kw, -0.01, kp.key_h + 0.2))
+            csk = cq.Solid.makeCone(kp.screw_csk_d / 2, 0, kp.screw_csk_d / 2,
+                                    pnt=cq.Vector(xk, 0, p.floor + 0.01), dir=cq.Vector(0, 0, -1))
+            hole = cq.Solid.makeCylinder(kp.screw_clear_d / 2, p.floor + 1,
+                                         pnt=cq.Vector(xk, 0, -0.5), dir=cq.Vector(0, 0, 1))
+            base = base.cut(cq.Workplane().add(csk)).cut(cq.Workplane().add(hole))
+        return base
+
     # ---------- print orientation ----------
     @staticmethod
     def print_back_down(w: cq.Workplane, back_y: float) -> cq.Workplane:
@@ -427,10 +461,58 @@ class Kit:
         underside overhangs. Works for every angle, including ones that tuck behind
         the lip face and so have no single flat back.
         """
-        return w.rotate((0, 0, 0), (0, 1, 0), -90).translate((0, 0, self.g.wall_out))
+        return w.rotate((0, 0, 0), (0, 1, 0), -90).translate((0, 0, self.wedge_hw))
 
     def print_cradle(self, w: cq.Workplane) -> cq.Workplane:
         return w.translate((0, 0, -self.g.floor_bot))
+
+
+def check_pose(kit: Kit, a: float, wedge: cq.Workplane, plate: cq.Workplane,
+               held: List[Tuple[str, cq.Workplane]],
+               envelopes: List[Tuple[str, cq.Workplane]] = ()) -> None:
+    """
+    Pose checks at angle `a` (axis_Y, drop and shift already set). `held` lists, in case
+    coordinates, everything the wedge carries (cradle and/or case parts):
+      - the lens points where the angle says;
+      - nothing held reaches the cover, the plate + rail, the toolhead keep-out or the window;
+      - the wedge clears the cover, plate, toolhead, window and everything it holds, and
+        wraps the rail.
+    `envelopes` (solid outside envelopes, e.g. the size mockup with no key pockets) are
+    checked against the keep-outs only, never against the wedge.
+    """
+    kp, g = kit.kp, kit.g
+    d = g.world_dir((0, 0, 1), a)
+    want = (0.0, math.cos(math.radians(a)), -math.sin(math.radians(a)))
+    if max(abs(x - y) for x, y in zip(d, want)) > 1e-6:
+        raise RuntimeError(f"{a:.0f} deg: lens points {d}, expected {want}")
+    th, win = kit.toolhead(), kit.window()
+    cover_w = g.to_world(g.cover())
+    plate_body = kit.g_plate_body()
+    keep_outs = [("cover", cover_w), ("plate", plate_body), ("rail", plate), ("toolhead keep-out", th),
+                 (f"window (above {kp.window_z - kp.window_margin:.0f} mm over the lip edge)", win)]
+    for name, part in list(held) + list(envelopes):
+        posed = kit.posed(part, a)
+        for kname, k in keep_outs:
+            if _ivol(posed, k) > 1e-3:
+                raise RuntimeError(f"{a:.0f} deg: the {name} reaches the {kname}")
+        if (name, part) in envelopes:
+            continue
+        if _ivol(posed, wedge) > 1e-3:
+            raise RuntimeError(f"{a:.0f} deg wedge interferes with the {name}")
+    for kname, k in keep_outs:
+        if _ivol(wedge, k) > 1e-3:
+            raise RuntimeError(f"{a:.0f} deg wedge runs into the {kname}")
+    # The slot must be fully enclosed by wedge material around the rail
+    rail_env = kit.rail(x0=-kit.wedge_hw, x1=kit.wedge_hw)
+    hull_band = wedge.union(kit.rail(grow=kp.rail_clear, x0=-kit.wedge_hw, x1=kit.wedge_hw))
+    # Rail volume NOT covered by wedge+slot must be ~0 (an intersection's volume can
+    # double-count overlapping pieces, so measure what's left over instead)
+    try:
+        uncovered = _vol(rail_env.cut(hull_band))
+    except ValueError:
+        uncovered = 0.0
+    if uncovered > 0.01 * _vol(rail_env):
+        raise RuntimeError(f"{a:.0f} deg wedge does not surround the rail")
 
 
 def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[float, float],
@@ -451,46 +533,13 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
     rays = case.build_ray_envelope(case.Params(), 40.0)
     if _ivol(cradle, rays) > 1e-3:
         raise RuntimeError("cradle vignettes the camera")
-    cover_w = g.to_world(g.cover())
-    plate_body = kit.g_plate_body()
-    rail_env = kit.rail(x0=-g.wall_out, x1=g.wall_out)
+    held = [("cradle", cradle)]
+    for vname, v in kit.variants.items():
+        env = case.build_size_mockup(v)
+        held += [(f"{vname} case", env), (f"{vname} case flipped", env.rotate((0, 0, 0), (0, 0, 1), 180))]
     for a, wedge in wedges.items():
         g.axis_Y = placements[a]
-        d = g.world_dir((0, 0, 1), a)
-        want = (0.0, math.cos(math.radians(a)), -math.sin(math.radians(a)))
-        if max(abs(x - y) for x, y in zip(d, want)) > 1e-6:
-            raise RuntimeError(f"{a:.0f} deg: lens points {d}, expected {want}")
-        th = kit.toolhead()
-        for part in [kit.build_cradle()] + kit.moving_parts()[1:]:
-            if _ivol(kit.posed(part, a), th) > 1e-3:
-                raise RuntimeError(f"{a:.0f} deg: the camera or cradle reaches the toolhead keep-out")
-        if _ivol(wedge, th) > 1e-3:
-            raise RuntimeError(f"{a:.0f} deg wedge reaches the toolhead keep-out")
-        win = kit.window()
-        for part in [wedge, kit.posed(cradle, a)] + [kit.posed(p, a) for p in kit.moving_parts()[1:]]:
-            if _ivol(part, win) > 1e-3:
-                raise RuntimeError(f"{a:.0f} deg: the camera, cradle or wedge reaches into the window "
-                                   f"(above {kp.window_z - kp.window_margin:.0f} mm over the lip edge)")
-        if _ivol(wedge, cover_w) > 1e-3 or _ivol(wedge, plate_body) > 1e-3:
-            raise RuntimeError(f"{a:.0f} deg wedge runs into the cover or plate")
-        if _ivol(wedge, plate) > 1e-3:
-            raise RuntimeError(f"{a:.0f} deg wedge interferes with the rail")
-        # The slot must be fully enclosed by wedge material around the rail
-        hull_band = wedge.union(kit.rail(grow=kp.rail_clear, x0=-g.wall_out, x1=g.wall_out))
-        # Rail volume NOT covered by wedge+slot must be ~0 (an intersection's volume can
-        # double-count overlapping pieces, so measure what's left over instead)
-        try:
-            uncovered = _vol(rail_env.cut(hull_band))
-        except ValueError:
-            uncovered = 0.0
-        if uncovered > 0.01 * _vol(rail_env):
-            raise RuntimeError(f"{a:.0f} deg wedge does not surround the rail")
-        posed_cradle = kit.posed(cradle, a)
-        if _ivol(wedge, posed_cradle) > 1e-3:
-            raise RuntimeError(f"{a:.0f} deg wedge interferes with the cradle")
-        for part in kit.moving_parts()[1:]:
-            if _ivol(kit.posed(part, a), wedge) > 1e-3:
-                raise RuntimeError(f"{a:.0f} deg wedge interferes with a case")
+        check_pose(kit, a, wedge, plate, held)
     printables = {"plate": Kit.print_back_down(plate, 0.0), "cradle": kit.print_cradle(cradle)}
     printables.update({f"wedge {a:.0f}": kit.print_wedge(w) for a, w in wedges.items()})
     for name, part in printables.items():
@@ -513,27 +562,70 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
              len(wedges))
 
 
-def build_custom_pose(kit: Kit, plate: cq.Workplane, cradle: cq.Workplane,
-                      angle: float, dy: float, dz: float, shift: float, out: str) -> str:
+def build_direct_pose(kit: Kit, plate: cq.Workplane, angle: float, dy: float, dz: float, shift: float,
+                      vname: str, rot: int, out: str) -> List[str]:
     """
-    One wedge for a pose picked in the viewer's Pose explorer, then the full self_check
-    (cover, toolhead, plate/rail, every case variant both ways, printability). Explorer
-    semantics: dy is the hinge-reference axis from the lip face (axis_Y), dz is + up so
-    drop = -dz, and the camera with its cradle slides `shift` mm up its own axis.
-    Returns the STL path.
+    The final, cradle-free mount for a pose picked in the viewer's Pose explorer: a wedge that
+    keys and screws straight into a thick-floor case base (the lens lands where the explorer
+    put it). Explorer semantics: dy is the hinge-reference axis from the lip face (axis_Y),
+    dz is + up so drop = -dz, and the camera slides `shift` mm up its own axis. `vname`/`rot`
+    pick the case variant and which end is up (the cable corner). Runs the case's own checks,
+    the pose checks and printability, then writes wedge, base, lid (and cable cap) STLs.
     """
+    kp = kit.kp
     kit.set_drop(-dz)
     kit.shift = shift
     kit.g.axis_Y = dy
-    log.info("Custom pose: %.1f deg, dy %.1f, dz %.1f, camera shift %.1f mm", angle, dy, dz, shift)
+    p = kit.direct_params(vname)
+    kit.half_w = p.out_w / 2
+    log.info("Direct pose: %.1f deg, dy %.1f, dz %.1f, camera shift %.1f mm, %s case turned %d deg, floor %.1f mm",
+             angle, dy, dz, shift, vname, rot, p.floor)
+    case.validate(p)
+    base, lid = kit.build_direct_base(vname), case.build_lid(p)
+    case.self_check(p, base, lid)                        # base/lid/board fit and the lens window, pockets included
+    cap = case.build_cable_cap(p) if p.use_cap else None
     wedge = kit.build_wedge(angle)
-    self_check(kit, {angle: wedge}, {angle: dy}, plate, cradle)
+    for name, part in [("plate", plate), ("wedge", wedge), ("base", base)]:
+        if len(part.solids().vals()) != 1 or not part.val().isValid():
+            raise RuntimeError(f"{name} is not a single valid solid")
+    held = [("case base", kit.to_mount_frame(base, rot)), ("lid", kit.to_mount_frame(lid, rot))]
+    if cap is not None:
+        held.append(("cable cap", kit.to_mount_frame(cap, rot)))
+    check_pose(kit, angle, wedge, plate, held,
+               envelopes=[("case envelope", kit.to_mount_frame(case.build_size_mockup(p), rot))])
+    # check_pose's wedge-vs-base test is also the key-seat test: the keys stand key_h proud of the
+    # pad, so anywhere but inside a pocket they would cut into the floor
+    # Printability: the base prints floor down as always; its pocket ceilings are 10 mm bridges
+    # on top of whatever the standard base already overhangs
+    pocket = kp.key_w + 2 * kp.key_clear
+    allowed_base = fm.overhang_area(case.build_base(kit.variants[vname])) + len(kit.key_xs) * pocket ** 2 + 1.0
+    printables = {"plate": (Kit.print_back_down(plate, 0.0), kp.max_overhang_area),
+                  "wedge": (kit.print_wedge(wedge), kp.max_overhang_area + 2 * kp.key_w * kp.key_h),
+                  "base": (base, allowed_base)}
+    for name, (part, allowed) in printables.items():
+        bb = part.val().BoundingBox()
+        if abs(bb.zmin) > 1e-3:
+            raise RuntimeError(f"{name} does not sit on the bed (zmin {bb.zmin:.3f})")
+        area = fm.overhang_area(part)
+        log.debug("Overhang %s: %.1f mm^2 (allowed %.0f)", name, area, allowed)
+        if area > allowed:
+            raise RuntimeError(f"{name}: {area:.0f} mm^2 of >45 deg overhang")
+    log.info("Direct pose self-check passed: case fit, lens clear, cover/plate/toolhead/window clear, keys seated, printable")
     os.makedirs(out, exist_ok=True)
-    name = f"pose_wedge_{angle:g}deg_dy{dy:g}_dz{dz:g}_shift{shift:g}.stl"
-    path = os.path.join(out, name)
-    cq.exporters.export(kit.print_wedge(wedge), path, tolerance=0.02, angularTolerance=0.1)
-    log.info("Wrote %s", path)
-    return path
+    tag = f"{angle:g}deg_dy{dy:g}_dz{dz:g}_shift{shift:g}"
+    vtag = vname.replace("+", "p").replace("-", "m")
+    files = {f"pose_wedge_{tag}.stl": kit.print_wedge(wedge),
+             f"pose_base_{vtag}_{tag}.stl": base,
+             f"pose_lid_{vtag}.stl": lid}
+    if cap is not None:
+        files[f"pose_cable_cap_{vtag}.stl"] = cap
+    paths = []
+    for name, shape in files.items():
+        path = os.path.join(out, name)
+        cq.exporters.export(shape, path, tolerance=0.02, angularTolerance=0.1)
+        log.info("Wrote %s", path)
+        paths.append(path)
+    return paths
 
 
 def main() -> None:
@@ -548,7 +640,10 @@ def main() -> None:
     ap.add_argument("--viewer", action="store_true", help="also write viewer meshes + viewer_kit.json")
     ap.add_argument("--pose", type=float, nargs=4, metavar=("ANGLE", "DY", "DZ", "SHIFT"),
                     help="build one wedge for a Pose-explorer export instead of the kit series: angle_deg, "
-                         "dy_mm, dz_mm (+ up), camera_shift_mm")
+                         "dy_mm, dz_mm (+ up), camera_shift_mm. Builds the cradle-free final mount.")
+    ap.add_argument("--case", default="side+Y:180",
+                    help="case variant and turn for --pose, VARIANT:0|180 (default side+Y:180 = cable out the "
+                         "top end toward +X, Charles's X+ Y+ corner)")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"),
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
@@ -559,7 +654,10 @@ def main() -> None:
     kit = Kit(kp)
     plate, cradle = kit.build_plate(), kit.build_cradle()
     if args.pose:
-        build_custom_pose(kit, plate, cradle, *args.pose, out=args.out)
+        vname, rot = args.case.rsplit(":", 1)
+        if vname not in kit.variants or rot not in ("0", "180"):
+            raise SystemExit(f"--case must be one of {list(kit.variants)} with :0 or :180, got {args.case}")
+        build_direct_pose(kit, plate, *args.pose, vname=vname, rot=int(rot), out=args.out)
         return
     parts = kit.moving_parts()
     wedges, placements = {}, {}
