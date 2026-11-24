@@ -11,9 +11,14 @@ hosted artifact. Run after cad/elp_16mp_case.py:
 
 Expects in --stl-dir: elp_16mp_base.stl, view_lid.stl (assembled position),
 view_module.stl (mock camera, assembled position).
+
+Also embeds every PNG in --renders-dir (from tools/render_previews.py) into the
+"Review renders" overlay, so the hosted page shows the section sheets too.
 """
 import argparse
 import base64
+import glob
+import json
 import logging
 import os
 import re
@@ -22,6 +27,7 @@ log = logging.getLogger("build_viewer")
 
 
 def b64(path: str) -> str:
+    """Base64 of a file's bytes."""
     with open(path, "rb") as f:
         data = f.read()
     log.debug("Encoded %s (%d bytes)", path, len(data))
@@ -29,9 +35,11 @@ def b64(path: str) -> str:
 
 
 def main() -> None:
+    """Rewrite the DATA and RENDERS blocks of the viewer in place."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stl-dir", default="out")
     ap.add_argument("--viewer", default="viewer/index.html")
+    ap.add_argument("--renders-dir", default="docs/renders", help="PNGs to embed in the renders overlay")
     ap.add_argument("--subtitle", help="replace the panel subtitle text")
     ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = ap.parse_args()
@@ -47,6 +55,13 @@ def main() -> None:
     html, n = re.subn(r"const DATA=\{.*?\};", lambda _: data, html, count=1, flags=re.S)
     if n != 1:
         raise SystemExit("DATA block not found in viewer; refusing to write")
+    pngs = sorted(glob.glob(os.path.join(args.renders_dir, "*.png")))
+    renders = "const RENDERS=%s;" % json.dumps(
+        [[os.path.splitext(os.path.basename(f))[0], b64(f)] for f in pngs], separators=(",", ":"))
+    html, n = re.subn(r"const RENDERS=\[.*?\];", lambda _: renders, html, count=1, flags=re.S)
+    if n != 1:
+        raise SystemExit("RENDERS block not found in viewer; refusing to write")
+    log.info("Embedded %d renders from %s", len(pngs), args.renders_dir)
     if args.subtitle:
         html, n = re.subn(r'(<div class="sub">).*?(</div>)', lambda m: m.group(1) + args.subtitle + m.group(2),
                           html, count=1, flags=re.S)

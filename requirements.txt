@@ -1,2 +1,2 @@
 cadquery>=2.4
-cairosvg>=2.7
+matplotlib>=3.8   # section renders in tools/render_previews.py (iso renders use VTK, which ships with cadquery)

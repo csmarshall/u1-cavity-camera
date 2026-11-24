@@ -70,10 +70,14 @@ The predecessor was the ELP-USB8MP05AF-V62 (8 MP IMX179, 62.3 × 9 × 6 mm), dro
 ## Commands
 
 ```sh
-pip install -r requirements.txt            # cadquery (plus cairosvg if rendering previews)
+# venv lives outside Dropbox: ~/.venvs/snapmaker-u1-camera-mount (see TOOLS-INSTALLED.md)
+pip install -r requirements.txt            # cadquery + matplotlib
 python3 cad/elp_16mp_case.py --out out --log-level DEBUG
-python3 tools/build_viewer.py --stl-dir out --subtitle "…"    # re-embed STLs in viewer/index.html
+python3 tools/render_previews.py           # iso (VTK) + exact section PNGs -> docs/renders/
+python3 tools/build_viewer.py --stl-dir out --subtitle "…"    # re-embed STLs + renders in viewer/index.html
 ```
+
+Don't use cadquery's SVG exporter for review renders. It rotates side views arbitrarily and scales from the 3D bounding box. `render_previews.py` explains why.
 
 After a successful build, copy the printable outputs into the committed folders:
 
