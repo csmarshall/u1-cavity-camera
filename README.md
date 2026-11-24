@@ -13,6 +13,7 @@ The camera is a 62.3 × 9 × 5.5 mm strip board with a Sony IMX298 sensor and a 
 | `stl/elp_16mp_lid.stl` | Lid, already flipped for printing. |
 | `stl/elp_16mp_*_screw.stl` | Same case closed with 2× M2 countersunk screws instead of snap hooks. |
 | `stl/elp_16mp_coupon_{base,lid}.stl` | Snap test coupon: the -X end of the case (12 mm slice) to test the hook click and release before a full print. |
+| `stl/elp_16mp_size_mockup.stl` | Solid block with the assembled case's outside shape, nozzle and lens window included, plus a crosshair on the lens axis. Print it to find a mount spot inside the printer. |
 | `step/elp_16mp_case.step` | Assembled base + lid (snap version) for CAD. |
 | `viewer/index.html` | Self-contained three.js viewer with explode, section cut and FOV cone. Open it in a browser. |
 

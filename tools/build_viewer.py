@@ -10,7 +10,8 @@ hosted artifact. Run after cad/elp_16mp_case.py:
     python3 tools/build_viewer.py --stl-dir out
 
 Expects in --stl-dir: elp_16mp_base.stl, view_lid.stl (assembled position),
-view_module.stl (mock camera, assembled position).
+view_module.stl (mock camera, assembled position), viewer_params.json (lens
+position and FOV from Params, so the viewer's FOV pyramid never drifts).
 
 Also embeds every PNG in --renders-dir (from tools/render_previews.py) into the
 "Review renders" overlay, so the hosted page shows the section sheets too.
@@ -55,6 +56,12 @@ def main() -> None:
     html, n = re.subn(r"const DATA=\{.*?\};", lambda _: data, html, count=1, flags=re.S)
     if n != 1:
         raise SystemExit("DATA block not found in viewer; refusing to write")
+    with open(os.path.join(args.stl_dir, "viewer_params.json")) as f:
+        geom = "const GEOM=%s;" % json.dumps(json.load(f), separators=(",", ":"))
+    html, n = re.subn(r"const GEOM=\{.*?\};", lambda _: geom, html, count=1, flags=re.S)
+    if n != 1:
+        raise SystemExit("GEOM block not found in viewer; refusing to write")
+    log.debug("Embedded %s", geom)
     pngs = sorted(glob.glob(os.path.join(args.renders_dir, "*.png")))
     renders = "const RENDERS=%s;" % json.dumps(
         [[os.path.splitext(os.path.basename(f))[0], b64(f)] for f in pngs], separators=(",", ":"))

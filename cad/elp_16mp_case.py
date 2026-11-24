@@ -28,6 +28,7 @@ Usage:
 Requires: cadquery (pip install cadquery)
 """
 import argparse
+import json
 import logging
 import math
 import os
@@ -124,6 +125,16 @@ class Params:
     # release before committing to a full case.
     coupon_l: float = 12.0       # length of the slice from the -X outer face
 
+    # --- Size mockup ---
+    # A solid block with the assembled case's outside shape (nozzle and lens
+    # window included) to hold up inside the printer and find a mount spot
+    # that clears the cover, gantry and toolhead. Lens face up, prints with no
+    # supports.
+    mock_mark_d: float = 0.4     # depth of the engraved lens crosshair
+    mock_mark_w: float = 0.6     # width of the crosshair lines
+    mock_mark_lx: float = 24.0   # crosshair arm length along X (Y arm is derived from out_w)
+    mock_mark_edge: float = 1.0  # plain margin left between the Y arm and the long faces
+
     # --- Derived geometry ---
     @property
     def bay(self): return self.cable_bay_l if self.cable_exit == "end" else 0.0
@@ -203,6 +214,12 @@ class Params:
         tan_h = math.tan(math.radians(self.hfov_deg / 2))
         return tan_h * math.hypot(self.aspect_w, self.aspect_h) / self.aspect_w
 
+    @property
+    def vfov_deg(self):
+        """Vertical FOV from HFOV and aspect, rectilinear lens."""
+        tan_h = math.tan(math.radians(self.hfov_deg / 2))
+        return 2 * math.degrees(math.atan(tan_h * self.aspect_h / self.aspect_w))
+
     def window_d_at(self, height_above_lens: float) -> float:
         """Window diameter needed at a given height above the lens front."""
         return 2 * (self.aperture_d / 2 + height_above_lens * self.tan_half_dfov + self.window_margin)
@@ -277,6 +294,10 @@ def validate(p: Params) -> None:
             raise ValueError("coupon_l too short to contain the -X snap pocket and a wall stub")
 
     outer_d = p.window_d_at(p.front_gap + p.lid_t)
+    if p.mock_mark_lx / 2 + abs(p.lens_x) > p.out_l / 2 - min_web:
+        raise ValueError("mockup crosshair X arm runs off the end of the case")
+    if p.mock_mark_lx <= outer_d + 4.0:
+        raise ValueError("mockup crosshair X arm would be hidden inside the lens window")
     if outer_d / 2 + abs(p.lens_y) > p.out_w / 2 - min_web:
         raise ValueError(f"lens window ({outer_d:.2f} mm) too wide for a {p.out_w:.1f} mm lid")
     for x in p.rib_xs:
@@ -446,6 +467,43 @@ def build_coupon(p: Params, base: cq.Workplane, lid: cq.Workplane) -> tuple:
     return base.intersect(box), lid.intersect(box)
 
 
+def build_size_mockup(p: Params) -> cq.Workplane:
+    """
+    Solid stand-in for the assembled case: base plus lid envelope, nozzle with
+    cable channel, the lid's FOV cone, and an engraved crosshair on the lens
+    axis. Its outside shape matches the real assembly (checked in self_check).
+    """
+    hw, z_top = p.out_w / 2, p.base_h + p.lid_t
+    log.info("Building size mockup: %.1f x %.1f x %.1f mm", p.out_l, p.out_w, z_top)
+    body = _box(p.out_x0, p.out_x1, -hw, hw, 0, z_top).edges("|Z").fillet(p.corner_r)
+    if p.use_nozzle:
+        body = body.union(build_nozzle(p))
+        x_end = p.out_x1 + p.nozzle_l + 0.1
+        r_b = p.cable_w / 2
+        bore = cq.Solid.makeCylinder(r_b, x_end - (p.out_x1 - 0.2),
+                                     pnt=cq.Vector(p.out_x1 - 0.2, p.cable_y, p.cable_z),
+                                     dir=cq.Vector(1, 0, 0))
+        body = body.cut(cq.Workplane().add(bore))
+        body = body.cut(_box(p.out_x1 - 0.2, x_end, p.cable_y - r_b, p.cable_y + r_b,
+                             p.cable_z, p.base_h + 1))
+    # Lens window cone, same as the lid, so the opening reads true
+    d_in, d_out = p.window_d_at(p.front_gap), p.window_d_at(p.front_gap + p.lid_t)
+    slope = (d_out - d_in) / 2 / p.lid_t
+    eps = 0.05
+    cone = cq.Solid.makeCone(d_in / 2 - slope * eps, d_out / 2 + slope * eps, p.lid_t + 2 * eps,
+                             pnt=cq.Vector(p.lens_x, p.lens_y, p.base_h - eps), dir=cq.Vector(0, 0, 1))
+    body = body.cut(cq.Workplane().add(cone))
+    # Crosshair on the lens axis, engraved into the top face around the cone
+    half_lx, half_w = p.mock_mark_lx / 2, p.mock_mark_w / 2
+    half_ly = hw - p.mock_mark_edge
+    z0 = z_top - p.mock_mark_d
+    for (dx, dy) in ((half_lx, half_w), (half_w, half_ly)):
+        body = body.cut(_box(p.lens_x - dx, p.lens_x + dx, p.lens_y - dy, p.lens_y + dy, z0, z_top + 1))
+    log.debug("Mockup crosshair %.1f x %.1f mm, %.1f deep at lens (%.1f, %.1f)",
+              2 * half_lx, 2 * half_ly, p.mock_mark_d, p.lens_x, p.lens_y)
+    return body
+
+
 def mock_module(p: Params) -> cq.Workplane:
     """Rough stand-in for the camera: PCB plus an assumed 8 mm square AF lens block."""
     pcb = _box(-p.pcb_l / 2, p.pcb_l / 2, -p.pcb_w / 2, p.pcb_w / 2, p.z_pcb_bottom, p.z_pcb_top)
@@ -467,6 +525,20 @@ def self_check(p: Params, base: cq.Workplane, lid: cq.Workplane) -> None:
     for name, part in (("base", base), ("lid", lid)):
         if len(part.solids().vals()) != 1 or not part.val().isValid():
             raise RuntimeError(f"{name} is not a single valid solid")
+    # Size mockup must match the assembled envelope it stands in for. Base and
+    # lid are built by separate code paths, so this catches drift between them
+    # and the mockup; it cannot catch a wrong Params value shared by all three.
+    mockup = build_size_mockup(p)
+    if len(mockup.solids().vals()) != 1 or not mockup.val().isValid():
+        raise RuntimeError("size mockup is not a single valid solid")
+    bb_asm = base.union(lid).val().BoundingBox()
+    bb_mock = mockup.val().BoundingBox()
+    for axis in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"):
+        delta = abs(getattr(bb_asm, axis) - getattr(bb_mock, axis))
+        if delta > 0.01:
+            raise RuntimeError(f"size mockup {axis} differs from the assembly by {delta:.3f} mm")
+    log.debug("Size mockup envelope matches assembly: %.2f x %.2f x %.2f mm",
+              bb_mock.xlen, bb_mock.ylen, bb_mock.zlen)
     if p.closure == "snap":
         c_base, c_lid = build_coupon(p, base, lid)
         for name, part in (("coupon base", c_base), ("coupon lid", c_lid)):
@@ -516,6 +588,7 @@ def main() -> None:
         "view_module.stl": mock_module(p),
         "elp_16mp_case.step": cq.Assembly().add(base, name="base").add(lid, name="lid").toCompound(),
     }
+    exports["elp_16mp_size_mockup.stl"] = build_size_mockup(p)
     if p.closure == "snap":
         c_base, c_lid = build_coupon(p, base, lid)
         exports["elp_16mp_coupon_base.stl"] = c_base
@@ -527,6 +600,12 @@ def main() -> None:
         else:
             cq.exporters.export(shape, path)
         log.info("Wrote %s (%d bytes)", path, os.path.getsize(path))
+    geom = {"lens_x": p.lens_x, "lens_y": p.lens_y, "lens_top_z": p.z_lens_top,
+            "hfov_deg": p.hfov_deg, "vfov_deg": p.vfov_deg,
+            "dfov_deg": 2 * math.degrees(math.atan(p.tan_half_dfov))}
+    with open(os.path.join(args.out, "viewer_params.json"), "w") as f:
+        json.dump(geom, f, indent=1)
+    log.debug("Viewer params: %s", geom)
     log.info("Assembled outer size: %.1f x %.1f x %.1f mm", p.out_l, p.out_w, p.base_h + p.lid_t)
 
 

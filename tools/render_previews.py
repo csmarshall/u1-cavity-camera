@@ -219,6 +219,9 @@ def views(p: case.Params) -> Dict[str, Callable[[str], None]]:
         "coupon_print_iso": lambda out: render_iso(
             [Layer("base", coupon_base_print), Layer("lid", coupon_lid_print)],
             "Snap test coupon, as printed (both on the bed, no supports)", out),
+        "size_mockup_iso": lambda out: render_iso(
+            [Layer("mount", case.build_size_mockup(p).val())],
+            "Size mockup, as printed (lens face up): outside shape of the assembled case", out),
         # Through the lens: rails, PCB seat, cone window
         "section_lens": lambda out: render_section(
             asm, "x", p.lens_x, "Lens: rails, PCB seat, FOV cone", out),
