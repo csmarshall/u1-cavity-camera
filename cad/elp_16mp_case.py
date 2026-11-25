@@ -463,6 +463,16 @@ def mock_cable(p: Params) -> cq.Workplane:
     return _cable_bore(p, -(p.exit_wall + 0.1), p.cable_w / 2 - p.cable_clear)
 
 
+def print_lid(p: Params, part: cq.Workplane) -> cq.Workplane:
+    """Lid (or lid coupon) in print orientation: outer face on the bed, ribs and hooks up, no supports."""
+    return part.translate((0, 0, -(p.base_h + p.lid_t))).rotate((0, 0, 0), (1, 0, 0), 180)
+
+
+def print_cap(p: Params, cap: cq.Workplane) -> cq.Workplane:
+    """Cable cap in print orientation: split face (with the bore groove) down on the bed."""
+    return cap.translate((0, 0, -p.cable_z))
+
+
 def build_base(p: Params) -> cq.Workplane:
     """Tray: PCB drops in lens-up and rests on two side rails."""
     log.info("Building base: %.1f x %.1f x %.1f mm, cable=%s, closure=%s",
@@ -800,11 +810,7 @@ def main() -> None:
         raise
 
     os.makedirs(args.out, exist_ok=True)
-    # Lid flipped for printing: outer face on the bed, ribs and hooks up, no supports
-    def flip_lid(part: cq.Workplane) -> cq.Workplane:
-        """Lid parts go outer face down on the bed: hooks and ribs up, no supports."""
-        return part.translate((0, 0, -(p.base_h + p.lid_t))).rotate((0, 0, 0), (1, 0, 0), 180)
-
+    flip_lid = lambda part: print_lid(p, part)
     lid_print = flip_lid(lid)
     exports = {
         "elp_16mp_base.stl": base,
@@ -817,7 +823,7 @@ def main() -> None:
     if p.use_cap:
         cap = build_cable_cap(p)
         # Split face (with the bore groove) down on the bed
-        exports["elp_16mp_cable_cap.stl"] = cap.translate((0, 0, -p.cable_z))
+        exports["elp_16mp_cable_cap.stl"] = print_cap(p, cap)
         # Viewer shows the cap in place with the base (both are fitted before the lid)
         exports["view_base.stl"] = cq.Workplane().add(cq.Compound.makeCompound([base.val(), cap.val()]))
     # Iteration STEP: named, coloured bodies in assembled position, case coordinates

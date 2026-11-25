@@ -135,6 +135,15 @@ def _box(*a) -> cq.Workplane:
     return case._box(*a)
 
 
+def _exact_zmin(w: cq.Workplane) -> float:
+    """Lowest Z from the exact geometry: cq's BoundingBox() also counts a stale tessellation (~0.03 mm low)."""
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+    box = Bnd_Box()
+    BRepBndLib.AddOptimal_s(w.val().wrapped, box, False, False)
+    return box.CornerMin().Z()
+
+
 def _vol(w: cq.Workplane) -> float:
     return sum(s.Volume() for s in w.solids().vals())
 
@@ -830,9 +839,14 @@ def build_direct_pose(kit: Kit, plate: cq.Workplane, angle: float, dy: float, dz
     vtag = vname.replace("+", "p").replace("-", "m")
     files = {f"pose_wedge_{tag}.stl": kit.print_wedge(wedge),
              f"pose_base_{vtag}_{tag}.stl": base,
-             f"pose_lid_{vtag}.stl": lid}
+             f"pose_lid_{vtag}.stl": case.print_lid(p, lid)}
     if cap is not None:
-        files[f"pose_cable_cap_{vtag}.stl"] = cap
+        files[f"pose_cable_cap_{vtag}.stl"] = case.print_cap(p, cap)
+    # Every file lands in print orientation, on the bed (the lid and cap were once exported as assembled)
+    for name, shape in files.items():
+        zmin = _exact_zmin(shape)
+        if abs(zmin) > 1e-3:
+            raise RuntimeError(f"{name} is not on the bed (zmin {zmin:.3f})")
     paths = []
     for name, shape in files.items():
         path = os.path.join(out, name)
