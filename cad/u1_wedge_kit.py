@@ -91,6 +91,28 @@ class KitParams:
     label_depth: float = 0.6
     carrier_wall: float = 1.6        # wedge material outside the dovetail slot
     max_overhang_area: float = 60.0  # mm^2 per printable (cradle lips + key edges)
+    # Adjustable slide (cradle-free mount, issue #10): the case rides a V-groove in its back on a
+    # wedge tongue, along its own axis (the explorer's shift), locked by an M3 button-head bolt into
+    # a plain hex nut that slides in a printed channel in the floor (Charles has no T-nuts).
+    # Travel runs from the case top level with the plate top up to the window keep-out.
+    slide_tongue_l: float = 16.0     # tongue length along the case axis
+    slide_pad_l: float = 24.0        # wedge contact pad length along the case axis
+    slide_groove_w: float = 7.0      # V-groove width at the case back
+    slide_groove_d: float = 1.2      # groove depth; 45 deg flanks
+    slide_clear: float = 0.3         # tongue-to-groove clearance (horizontal, per side)
+    slide_end_clear: float = 0.5     # groove/channel ends past the travel
+    slide_neck_t: float = 1.2        # floor ledge the nut pulls against
+    slide_top_margin: float = 0.5    # travel stops this far short of the window keep-out
+    nut_af: float = 5.5              # M3 hex nut across flats
+    nut_t: float = 2.4               # M3 hex nut thickness
+    nut_clear: float = 0.2           # per side: channel flats stop the nut turning (corners 6.35 > channel)
+    bolt_l: float = 10.0             # M3 button-head length (Charles has 6 mm and up)
+    bolt_clear_d: float = 3.4
+    bolt_head_d: float = 5.7         # ISO 7380 M3 button head
+    cbore_clear: float = 0.6         # counterbore diameter over the head
+    scale_depth: float = 0.4         # engraved scale and index depth
+    scale_tick_w: float = 0.5
+    scale_text_h: float = 2.2
 
 
 def _box(*a) -> cq.Workplane:
@@ -156,6 +178,7 @@ class Kit:
         self.base_axis_Z = self.g.axis_Z
         self.set_drop(kp.drop)
         self.shift = 0.0                              # camera slid up its own axis, mm (custom pose only)
+        self.slide = None                             # Slide geometry once setup_slide() has run (cradle-free mount)
         self.half_w = None                            # wedge half-width (world X); None = the cradle's, g.wall_out
         self.g.cradle_x0, self.g.cradle_x1 = -(half - self.mp.end_margin), half - self.mp.end_margin
         # The kit plate has no hinge arms: it sits between two ribs on the lip
@@ -338,9 +361,14 @@ class Kit:
         # Long pad across two adjacent pockets: two keys, two M3 screws, ~3x the contact
         # area of one key and no twist (Charles's call). Which pair depends on the camera
         # shift: the one nearest rail height (top + middle when unshifted).
-        x_top, x_mid = self.pad_pair(angle)
-        xk = (x_top + x_mid) / 2
-        hp = (x_mid - x_top) / 2 + kp.pad_w / 2
+        # Slide (cradle-free mount): one pad centred at rail height carrying the tongue and bolt.
+        if self.slide is not None:
+            x_top = x_mid = None
+            xk, hp = self.slide["xt0"], kp.slide_pad_l / 2
+        else:
+            x_top, x_mid = self.pad_pair(angle)
+            xk = (x_top + x_mid) / 2
+            hp = (x_mid - x_top) / 2 + kp.pad_w / 2
 
         def pad(x, y):
             v = self.posed(cq.Workplane().add(cq.Vertex.makeVertex(x, y, g.floor_bot)), angle).val()
@@ -367,6 +395,9 @@ class Kit:
         hull = hull.union(carrier)
         hull = hull.cut(_box(-500, 500, -100, mp.plate_t, 0, mp.plate_h)).cut(g.to_world(g.cover()))
         hull = _clean(hull)
+        if self.slide is not None:
+            wedge = self._slide_wedge_features(hull, angle)
+            return self._label_wedge(wedge, angle, w)
         # Key on face B, pilot hole into it
         kw = kp.key_w / 2
         key_local, pilots_local = None, []
@@ -389,7 +420,64 @@ class Kit:
         wedge = body.union(key)
         # Dovetail slot through the wedge along X
         wedge = wedge.cut(self.rail(grow=kp.rail_clear, x0=-50, x1=50))
+        return self._label_wedge(wedge, angle, w)
 
+    def _teardrop_z(self, r: float, x: float, z0: float, z1: float) -> cq.Workplane:
+        """
+        Hole along mount Z (the bolt axis) from z0 to z1 with a 45-degree peak toward the
+        slide's world-+X side: the wedge prints on its -X face, so world +X is up and the
+        crown needs no bridge.
+        """
+        side = self.slide["side"]
+        k = r / math.sqrt(2)
+        circ = cq.Workplane("XY", origin=(x, 0, z0)).circle(r).extrude(z1 - z0)
+        peak = (cq.Workplane("XY", origin=(0, 0, z0))
+                .polyline([(x - k, side * k), (x, side * r * math.sqrt(2)), (x + k, side * k)]).close()
+                .extrude(z1 - z0))
+        return circ.union(peak)
+
+    def slide_bolt_cuts(self) -> Tuple[cq.Workplane, cq.Workplane]:
+        """(bolt hole, head counterbore) in the mount frame at the nominal shift."""
+        kp, fb, lay, xt = self.kp, self.g.floor_bot, self.slide_layout(), self.slide["xt0"]
+        seat_z = fb - lay["seat"]
+        hole = self._teardrop_z(kp.bolt_clear_d / 2, xt, seat_z - 1.0, fb + kp.slide_groove_d + 0.5)
+        cbore = self._teardrop_z((kp.bolt_head_d + kp.cbore_clear) / 2, xt, seat_z - 80.0, seat_z)
+        return hole, cbore
+
+    def slide_hardware(self, angle: float) -> cq.Workplane:
+        """M3 button-head bolt + hex nut as installed (world, nominal shift), for renders and the viewer."""
+        kp, fb, lay, xt = self.kp, self.g.floor_bot, self.slide_layout(), self.slide["xt0"]
+        seat_z = fb - lay["seat"]
+        head = cq.Workplane("XY", origin=(xt, 0, seat_z - 1.65)).circle(kp.bolt_head_d / 2).extrude(1.65)
+        shank = cq.Workplane("XY", origin=(xt, 0, seat_z)).circle(1.5).extrude(kp.bolt_l)
+        nut = (cq.Workplane("XY", origin=(xt, 0, fb + lay["z_ch0"]))
+               .polygon(6, kp.nut_af / math.cos(math.pi / 6)).extrude(kp.nut_t)
+               .rotate((xt, 0, 0), (xt, 0, 1), 30))          # flats face the channel walls (+-Y)
+        return self.posed(head.union(shank).union(nut), angle)
+
+    def _slide_wedge_features(self, hull: cq.Workplane, angle: float) -> cq.Workplane:
+        """Tongue, bolt hole + counterbore, rail slot and scale index on the slide wedge."""
+        kp, g, sl = self.kp, self.g, self.slide
+        fb, xt, w = g.floor_bot, sl["xt0"], self.wedge_hw
+        th = kp.slide_groove_d - kp.slide_clear      # tongue stays short of the groove floor: the pad seats
+        tongue = fm._prism_x(self._slide_profile(kp.slide_groove_w / 2 - kp.slide_clear, th + 0.01, fb - 0.01),
+                             xt - kp.slide_tongue_l / 2, xt + kp.slide_tongue_l / 2)
+        hole, cbore = self.slide_bolt_cuts()
+        index = _box(xt - kp.scale_tick_w / 2, xt + kp.scale_tick_w / 2,
+                     min(sl["side"] * (w - kp.scale_depth), sl["side"] * (w + 0.1)),
+                     max(sl["side"] * (w - kp.scale_depth), sl["side"] * (w + 0.1)), fb - 4.0, fb + 0.01)
+        # Drill body and tongue separately, then join (drilling after a union can give OCC a null shape)
+        drill = [self.posed(hole, angle), self.posed(cbore, angle)]
+        body, tng = hull, self.posed(tongue, angle)
+        for d in drill:
+            body, tng = body.cut(d), tng.cut(d)
+        wedge = body.union(tng)
+        wedge = wedge.cut(self.rail(grow=kp.rail_clear, x0=-50, x1=50))
+        return _clean(wedge.cut(self.posed(index, angle)))
+
+    def _label_wedge(self, wedge: cq.Workplane, angle: float, w: float) -> cq.Workplane:
+        """Engrave the angle on the wedge's +X side face where it fits."""
+        kp = self.kp
         # Angle label on the +X side face
         # Angle label on the +X side face: search a grid over that face for a spot
         # where the whole label lands on solid material (the slot, the clipped
@@ -439,10 +527,115 @@ class Kit:
         """Case part (outer floor at Z=0) -> mount frame (outer floor at g.floor_bot), turned `rot` deg about the lens axis."""
         return part.rotate((0, 0, 0), (0, 0, 1), rot).translate((0, 0, self.g.floor_bot))
 
+    def from_mount_frame(self, part: cq.Workplane, rot: int = 0) -> cq.Workplane:
+        """Inverse of to_mount_frame: mount frame -> case frame (outer floor at Z=0)."""
+        return part.translate((0, 0, -self.g.floor_bot)).rotate((0, 0, 0), (0, 0, 1), -rot)
+
+    def setup_slide(self, angle: float, vname: str, rot: int, held_mount: List[cq.Workplane]) -> Dict:
+        """
+        Slide geometry for the cradle-free mount at the current pose (axis_Y, drop and shift = the
+        nominal pick, already set). The wedge is world-fixed and built at the nominal shift; the
+        case slides under it. A case point at mount x sits under the wedge's mount-x `xt0` when
+        x - s = xt0 - s_nom, so the tick for shift s goes at x = xt0 + (s - s_nom).
+        Travel: the top of `held_mount` (mount-frame case parts) moves linearly with s, so solve for
+        level-with-plate-top (s_min) and the window keep-out less slide_top_margin (s_max).
+        """
+        kp, g = self.kp, self.g
+        s_nom = self.shift
+        xt0 = self.rail_height_x(angle)
+
+        def top_z(s: float) -> float:
+            self.shift = s
+            z = max(self.posed(part, angle).val().BoundingBox().zmax for part in held_mount)
+            self.shift = s_nom
+            return z
+        z0, z1 = top_z(0.0), top_z(10.0)
+        rate = (z1 - z0) / 10.0
+        if rate <= 0:
+            raise RuntimeError(f"{angle:.0f} deg: shifting the camera does not raise it (rate {rate:.3f})")
+        s_min = (self.mp.plate_h - z0) / rate
+        s_max = (kp.window_z - kp.window_margin - kp.slide_top_margin - z0) / rate
+        if not s_min <= s_nom <= s_max:
+            raise RuntimeError(f"nominal shift {s_nom:.1f} is outside the travel {s_min:.1f}..{s_max:.1f}")
+        # Which mount-frame side faces world +X: the scale and index go there (the wedge's +X face
+        # is on top as printed, and it is the side Charles reads from the front of the printer)
+        probe = lambda y: self.posed(cq.Workplane().add(cq.Vertex.makeVertex(0, y, g.floor_bot)), angle).val().X
+        side = 1 if probe(1.0) > probe(0.0) else -1
+        lo, hi = xt0 + s_min - s_nom, xt0 + s_max - s_nom          # tongue/bolt centre sweep in case mount-x
+        self.slide = dict(angle=angle, rot=rot, vname=vname, s_nom=s_nom, s_min=s_min, s_max=s_max,
+                          xt0=xt0, side=side, lo=lo, hi=hi, rate=rate)
+        log.info("Slide: shift %.1f..%.1f mm (nominal %.1f), %.2f mm up per mm of slide, tongue at case x %.1f",
+                 s_min, s_max, s_nom, rate, xt0)
+        return self.slide
+
+    def _slide_profile(self, half_w: float, depth: float, z0: float) -> List[Tuple[float, float]]:
+        """45-degree V-groove/tongue cross-section (y, z) from z0 (the case back) up `depth`."""
+        return [(-half_w, z0), (half_w, z0), (half_w - depth, z0 + depth), (-half_w + depth, z0 + depth)]
+
+    def slide_layout(self) -> Dict[str, float]:
+        """Case-floor stack for the slide, in local Z above the outer floor face, and the bolt seat depth."""
+        kp = self.kp
+        z_neck = kp.slide_groove_d
+        z_ch0 = z_neck + kp.slide_neck_t
+        z_ch1 = z_ch0 + kp.nut_t + 2 * kp.nut_clear
+        # Bolt tip just past the nut when it is pulled down onto the neck ledge
+        seat = kp.bolt_l - (z_ch0 + kp.nut_t + kp.nut_clear)
+        return dict(z_neck=z_neck, z_ch0=z_ch0, z_ch1=z_ch1, seat=seat,
+                    tip=kp.bolt_l - seat, ch_hw=kp.nut_af / 2 + kp.nut_clear,
+                    nut_r=kp.nut_af / math.sqrt(3) + kp.nut_clear)
+
+    def slide_base_cuts(self, p: case.Params) -> Tuple[cq.Workplane, cq.Workplane, float]:
+        """
+        (track, scale, expected scale volume) in the mount frame with the case turned: the V-groove,
+        the neck slot, the nut channel open at the non-cable end, and the engraved scale.
+        """
+        kp, g, sl, lay = self.kp, self.g, self.slide, self.slide_layout()
+        fb, ec = g.floor_bot, kp.slide_end_clear
+        gx0, gx1 = sl["lo"] - kp.slide_tongue_l / 2 - ec, sl["hi"] + kp.slide_tongue_l / 2 + ec
+        groove = fm._prism_x(self._slide_profile(kp.slide_groove_w / 2, kp.slide_groove_d + 0.01, fb - 0.01),
+                             gx0, gx1)
+        nr = kp.bolt_clear_d / 2
+        neck = _box(sl["lo"] - nr - ec, sl["hi"] + nr + ec, -nr, nr,
+                    fb + lay["z_neck"] - 0.01, fb + lay["z_ch0"] + 0.01)
+        # Cable exits at the case's local +X end in every variant, so the nut goes in at local -X
+        open_dir = -1 if sl["rot"] == 0 else 1
+        inner = (sl["lo"] - lay["nut_r"] - ec) if open_dir > 0 else (sl["hi"] + lay["nut_r"] + ec)
+        cx0, cx1 = (inner, 500) if open_dir > 0 else (-500, inner)
+        channel = _box(cx0, cx1, -lay["ch_hw"], lay["ch_hw"], fb + lay["z_ch0"], fb + lay["z_ch1"])
+        track = groove.union(neck).union(channel)
+        # Scale on the floor band of the world-+X side: 1 mm ticks, long ones + numbers every 5
+        hw, side, d = p.out_w / 2, sl["side"], kp.scale_depth
+        y_in, y_out = side * (hw - d), side * (hw + 0.1)
+        ticks, expected = None, 0.0
+        for s in range(math.ceil(sl["s_min"]), math.floor(sl["s_max"]) + 1):
+            x = sl["xt0"] + s - sl["s_nom"]
+            major = s % 5 == 0
+            th = 2.4 if major else 1.4
+            t = _box(x - kp.scale_tick_w / 2, x + kp.scale_tick_w / 2, min(y_in, y_out), max(y_in, y_out),
+                     fb + 0.4, fb + 0.4 + th)
+            expected += kp.scale_tick_w * d * th
+            ticks = t if ticks is None else ticks.union(t)
+            if major:
+                # Reads upright (toward the lens) from outside the face
+                plane = cq.Plane(origin=(x, side * (hw + 0.01), fb + 3.2), xDir=(-side, 0, 0), normal=(0, side, 0))
+                txt = cq.Workplane(plane).text(f"{s}", kp.scale_text_h, -(d + 0.01), kind="bold",
+                                               halign="center", valign="bottom", combine=False, clean=False)
+                ticks = ticks.union(txt)
+        return track, ticks, expected
+
     def build_direct_base(self, vname: str) -> cq.Workplane:
-        """Thick-floor base with a key pocket and a flush countersunk M3 at every key_xs (symmetric: either way up)."""
+        """
+        Thick-floor base for the cradle-free mount. With a slide set up: the V-groove, nut channel
+        and engraved scale (issue #10). Without: a key pocket and a flush countersunk M3 at every
+        key_xs (symmetric: either way up).
+        """
         kp, p = self.kp, self.direct_params(vname)
         base = case.build_base(p)
+        if self.slide is not None:
+            rot = self.slide["rot"]
+            track, scale, _ = self.slide_base_cuts(p)
+            base = base.cut(self.from_mount_frame(track, rot)).cut(self.from_mount_frame(scale, rot))
+            return _clean(base)
         kw = kp.key_w / 2 + kp.key_clear
         for xk in self.key_xs:
             base = base.cut(_box(xk - kw, xk + kw, -kw, kw, -0.01, kp.key_h + 0.2))
@@ -570,12 +763,14 @@ def self_check(kit: Kit, wedges: Dict[float, cq.Workplane], placements: Dict[flo
 def build_direct_pose(kit: Kit, plate: cq.Workplane, angle: float, dy: float, dz: float, shift: float,
                       vname: str, rot: int, out: str) -> List[str]:
     """
-    The final, cradle-free mount for a pose picked in the viewer's Pose explorer: a wedge that
-    keys and screws straight into a thick-floor case base (the lens lands where the explorer
-    put it). Explorer semantics: dy is the hinge-reference axis from the lip face (axis_Y),
-    dz is + up so drop = -dz, and the camera slides `shift` mm up its own axis. `vname`/`rot`
-    pick the case variant and which end is up (the cable corner). Runs the case's own checks,
-    the pose checks and printability, then writes wedge, base, lid (and cable cap) STLs.
+    The final, cradle-free mount for a pose picked in the viewer's Pose explorer: a wedge whose
+    tongue rides a V-groove in a thick-floor case base, so the case slides along its own axis
+    (issue #10) and locks with an M3 button head into a hex nut in the floor. Explorer semantics:
+    dy is the hinge-reference axis from the lip face (axis_Y), dz is + up so drop = -dz, and
+    `shift` is the nominal slide (the wedge is built there; the case travels from level with the
+    plate top to the window keep-out). `vname`/`rot` pick the case variant and which end is up
+    (the cable corner). Runs the case's own checks, the pose checks at both travel ends and the
+    nominal, the slide's own checks and printability, then writes wedge, base, lid (and cap) STLs.
     """
     kp = kit.kp
     kit.set_drop(-dz)
@@ -586,26 +781,55 @@ def build_direct_pose(kit: Kit, plate: cq.Workplane, angle: float, dy: float, dz
     log.info("Direct pose: %.1f deg, dy %.1f, dz %.1f, camera shift %.1f mm, %s case turned %d deg, floor %.1f mm",
              angle, dy, dz, shift, vname, rot, p.floor)
     case.validate(p)
-    base, lid = kit.build_direct_base(vname), case.build_lid(p)
-    case.self_check(p, base, lid)                        # base/lid/board fit and the lens window, pockets included
+    lid = case.build_lid(p)
     cap = case.build_cable_cap(p) if p.use_cap else None
+    outer = [kit.to_mount_frame(x, rot) for x in [case.build_base(p), lid] + ([cap] if cap is not None else [])]
+    sl = kit.setup_slide(angle, vname, rot, outer)
+    check_slide(kit, p)
+    base = kit.build_direct_base(vname)
+    case.self_check(p, base, lid)                        # base/lid/board fit and the lens window
     wedge = kit.build_wedge(angle)
     for name, part in [("plate", plate), ("wedge", wedge), ("base", base)]:
         if len(part.solids().vals()) != 1 or not part.val().isValid():
             raise RuntimeError(f"{name} is not a single valid solid")
+    check_wedge_slide(kit, wedge, angle)
     held = [("case base", kit.to_mount_frame(base, rot)), ("lid", kit.to_mount_frame(lid, rot))]
     if cap is not None:
         held.append(("cable cap", kit.to_mount_frame(cap, rot)))
-    check_pose(kit, angle, wedge, plate, held,
-               envelopes=[("case envelope", kit.to_mount_frame(case.build_size_mockup(p), rot))])
-    # check_pose's wedge-vs-base test is also the key-seat test: the keys stand key_h proud of the
-    # pad, so anywhere but inside a pocket they would cut into the floor
-    # Printability: the base prints floor down as always; its pocket ceilings are 10 mm bridges
-    # on top of whatever the standard base already overhangs
-    pocket = kp.key_w + 2 * kp.key_clear
-    allowed_base = fm.overhang_area(case.build_base(kit.variants[vname])) + len(kit.key_xs) * pocket ** 2 + 1.0
+    env = [("case envelope", kit.to_mount_frame(case.build_size_mockup(p), rot))]
+    # The wedge is world-fixed; the case slides under it. Every pose check at both travel ends
+    # and the nominal: this is also the tongue-in-groove and groove end-stop test.
+    for s in (sl["s_min"], sl["s_nom"], sl["s_max"]):
+        kit.shift = s
+        check_pose(kit, angle, wedge, plate, held, envelopes=env)
+        log.debug("Pose checks pass at shift %.2f", s)
+    kit.shift = sl["s_nom"]
+    # Scale truth through the real pose (not the tick formula): with the case slid to s, the
+    # case point where the tick for s is engraved must land on the wedge's index in world
+    fb = kit.g.floor_bot
+    pt = lambda x: cq.Workplane().add(cq.Vertex.makeVertex(x, 0, fb))
+    index_w = kit.posed(pt(sl["xt0"]), angle).val()
+    for s in (sl["s_min"], sl["s_max"]):
+        kit.shift = s
+        tick_w = kit.posed(pt(sl["xt0"] + s - sl["s_nom"]), angle).val()
+        kit.shift = sl["s_nom"]
+        miss = (tick_w.Center() - index_w.Center()).Length
+        if miss > 1e-6:
+            raise RuntimeError(f"scale tick for shift {s:.1f} lands {miss:.3f} mm off the index")
+    # Printability: the base prints floor down; its extra overhangs are the nut channel ceiling
+    # (a straight bridge), the groove-to-neck ledges and the engraved scale's ceilings
+    lay = kit.slide_layout()
+    track, scale, _ = kit.slide_base_cuts(p)
+    ch_bb = track.val().BoundingBox()
+    groove_l = (sl["hi"] - sl["lo"]) + kp.slide_tongue_l + 2 * kp.slide_end_clear
+    ledge = (kp.slide_groove_w / 2 - kp.slide_groove_d) - kp.bolt_clear_d / 2
+    chan_l = min(ch_bb.xmax, p.out_l) - max(ch_bb.xmin, -p.out_l)
+    allowed_base = (fm.overhang_area(case.build_base(p)) + 2 * lay["ch_hw"] * min(chan_l, p.out_l)
+                    + 2 * max(ledge, 0) * groove_l + fm.overhang_area(scale) + 1.0)
     printables = {"plate": (Kit.print_back_down(plate, 0.0), kp.max_overhang_area),
-                  "wedge": (kit.print_wedge(wedge), kp.max_overhang_area + 2 * kp.key_w * kp.key_h),
+                  # On its side, the tongue's lower flank is a 45 deg face (borderline) along its length
+                  "wedge": (kit.print_wedge(wedge),
+                            kp.max_overhang_area + kp.slide_tongue_l * kp.slide_groove_d * math.sqrt(2)),
                   "base": (base, allowed_base)}
     for name, (part, allowed) in printables.items():
         bb = part.val().BoundingBox()
@@ -615,7 +839,8 @@ def build_direct_pose(kit: Kit, plate: cq.Workplane, angle: float, dy: float, dz
         log.debug("Overhang %s: %.1f mm^2 (allowed %.0f)", name, area, allowed)
         if area > allowed:
             raise RuntimeError(f"{name}: {area:.0f} mm^2 of >45 deg overhang")
-    log.info("Direct pose self-check passed: case fit, lens clear, cover/plate/toolhead/window clear, keys seated, printable")
+    log.info("Direct pose self-check passed: case fit, lens clear, cover/plate/toolhead/window clear over the "
+             "whole slide (%.1f..%.1f), nut channel + scale + bolt seat OK, printable", sl["s_min"], sl["s_max"])
     os.makedirs(out, exist_ok=True)
     tag = f"{angle:g}deg_dy{dy:g}_dz{dz:g}_shift{shift:g}"
     vtag = vname.replace("+", "p").replace("-", "m")
@@ -631,6 +856,63 @@ def build_direct_pose(kit: Kit, plate: cq.Workplane, angle: float, dy: float, dz
         log.info("Wrote %s", path)
         paths.append(path)
     return paths
+
+
+def check_slide(kit: Kit, p: case.Params) -> None:
+    """Slide stack and extents: webs around the nut channel, bolt length, groove and pad on the case back."""
+    kp, sl, lay = kit.kp, kit.slide, kit.slide_layout()
+    min_web = 0.8
+    roof = p.floor - lay["z_ch1"]
+    if roof < min_web:
+        raise RuntimeError(f"nut channel roof {roof:.2f} mm under the board cavity (< {min_web})")
+    side_web = p.out_w / 2 - max(lay["ch_hw"], kp.slide_groove_w / 2) - kp.scale_depth
+    if side_web < min_web:
+        raise RuntimeError(f"slide leaves {side_web:.2f} mm of floor beside the channel/groove")
+    if not lay["z_ch0"] + 0.75 * kp.nut_t <= lay["tip"] <= lay["z_ch1"]:
+        raise RuntimeError(f"bolt tip at {lay['tip']:.2f} mm does not engage the nut inside the channel")
+    if lay["seat"] < 1.0:
+        raise RuntimeError(f"bolt seat only {lay['seat']:.2f} mm into the wedge: use a longer bolt")
+    if kp.bolt_clear_d >= kp.nut_af:
+        raise RuntimeError("neck slot is wider than the nut: the nut would pull through")
+    if kp.slide_groove_w / 2 - kp.slide_groove_d < kp.bolt_clear_d / 2:
+        raise RuntimeError("groove narrower at its floor than the neck slot")
+    # Snap pockets sit above the channel (the channel runs out through the end block)
+    for h in p.hooks():
+        if h["z_tip"] - 0.4 < lay["z_ch1"] + min_web:
+            raise RuntimeError(f"nut channel reaches the snap pocket (pocket floor z {h['z_tip'] - 0.4:.2f})")
+    # Groove and pad stay on the case back over the whole travel (mount x, case turned)
+    x0, x1 = (p.out_x0, p.out_x1) if sl["rot"] == 0 else (-p.out_x1, -p.out_x0)
+    gx0 = sl["lo"] - kp.slide_tongue_l / 2 - kp.slide_end_clear
+    gx1 = sl["hi"] + kp.slide_tongue_l / 2 + kp.slide_end_clear
+    # The groove only takes the bottom slide_groove_d of the floor (the snap pockets above it are
+    # checked separately), so it may run under the end blocks; its closed ends are the travel stops
+    # and must keep a wall short of the rounded corners
+    if gx0 < x0 + p.corner_r + min_web or gx1 > x1 - p.corner_r - min_web:
+        raise RuntimeError(f"groove {gx0:.1f}..{gx1:.1f} runs out of the case back ({x0:.1f}..{x1:.1f})")
+    px0, px1 = sl["lo"] - kp.slide_pad_l / 2, sl["hi"] + kp.slide_pad_l / 2
+    if px0 < x0 + p.corner_r or px1 > x1 - p.corner_r:
+        raise RuntimeError(f"wedge pad leaves the case back over the travel ({px0:.1f}..{px1:.1f})")
+    log.debug("Slide stack: groove 0..%.1f, neck ..%.1f, nut channel ..%.1f, roof %.2f, side web %.2f, "
+              "bolt seat %.2f mm into the wedge, tip %.2f; groove %.1f..%.1f, pad sweep %.1f..%.1f",
+              lay["z_neck"], lay["z_ch0"], lay["z_ch1"], roof, side_web, lay["seat"], lay["tip"],
+              gx0, gx1, px0, px1)
+
+
+def check_wedge_slide(kit: Kit, wedge: cq.Workplane, angle: float) -> None:
+    """The bolt head has a seat (a ring of wedge under it) and the counterbore reaches open air."""
+    kp, g, lay, xt = kit.kp, kit.g, kit.slide_layout(), kit.slide["xt0"]
+    r_head = (kp.bolt_head_d + kp.cbore_clear) / 2
+    seat_z = g.floor_bot - lay["seat"]
+    ring = (cq.Workplane("XY", origin=(xt, 0, seat_z)).circle(r_head + 1.2).circle(r_head + 0.05).extrude(0.8))
+    ring_w = kit.posed(ring, angle)
+    got, want = _ivol(ring_w, wedge), _vol(ring_w)
+    if got < 0.8 * want:
+        raise RuntimeError(f"bolt head seat is only {100 * got / want:.0f}% wedge material")
+    # A head-sized rod down the counterbore from the seat must leave the wedge without hitting it
+    rod = cq.Workplane("XY", origin=(xt, 0, seat_z - 60.0)).circle(r_head - 0.2).extrude(60.0 - 0.05)
+    if _ivol(kit.posed(rod, angle), wedge) > 1e-3:
+        raise RuntimeError("the counterbore is blocked: a driver cannot reach the bolt head")
+    log.debug("Bolt seat %.0f%% material, counterbore clear", 100 * got / want)
 
 
 def main() -> None:
@@ -746,6 +1028,25 @@ def explorer_block(kit: Kit, names: Dict[str, str], out_dir: str) -> dict:
     # Cradle-free mount (what --pose builds): thick-floor base (+ cable cap) and lid per variant,
     # already in the mount frame (outer floor at floor_bot), so the explorer poses them like the
     # cradle-held case. The nozzle tips move with the thicker floor.
+    # The slide (issue #10) is built for the chosen pose: the wedge and its bolt + nut are
+    # world-fixed meshes the explorer shows when its angle/dy/dz match the pick, and every
+    # variant's base gets the groove, nut channel and scale (laid out for the chosen turn)
+    a0, dy0, dz0, s0 = kp.chosen_pose
+    cv, crot = kp.chosen_case.rsplit(":", 1)
+    kit.set_drop(-dz0)
+    kit.shift, g.axis_Y = s0, dy0
+    cp = kit.direct_params(cv)
+    kit.half_w = cp.out_w / 2
+    outer = [kit.to_mount_frame(x, int(crot)) for x in [case.build_base(cp), case.build_lid(cp)]
+             + ([case.build_cable_cap(cp)] if cp.use_cap else [])]
+    sl = kit.setup_slide(a0, cv, int(crot), outer)
+    slide = {"s_min": sl["s_min"], "s_max": sl["s_max"], "s_nom": s0, "angle": a0, "dy": dy0, "dz": dz0}
+    for part, shape in {"wedge": kit.build_wedge(a0), "hw": kit.slide_hardware(a0)}.items():
+        fn = f"viewer_kit_slide_{part}.stl"
+        cq.exporters.export(shape, os.path.join(out_dir, fn), tolerance=0.02, angularTolerance=0.1)
+        slide[part] = fn
+    kit.set_drop(0.0)
+    kit.shift, g.axis_Y = 0.0, 0.0
     direct = {}
     for vname in kit.variants:
         p = kit.direct_params(vname)
@@ -761,8 +1062,8 @@ def explorer_block(kit: Kit, names: Dict[str, str], out_dir: str) -> dict:
             direct[vtag][part] = fn
         tip = p.place_exit(cq.Workplane().add(cq.Vertex.makeVertex(p.nozzle_l, 0, p.cable_z)))
         tips[vtag] = list(kit.to_mount_frame(tip).val().toTuple())
+    kit.slide, kit.half_w = None, None
     w = kit.direct_params("end").out_w / 2           # the cradle-free wedge is case-wide
-    a0, dy0, dz0, s0 = kp.chosen_pose
     return {"m0": m0, "axis": list(axis), "cradle_x0": g.cradle_x0, "cradle_x1": g.cradle_x1,
             "floor_bot": g.floor_bot, "pad_x": kp.pad_w, "pad_y": 2 * w,
             "plate_t": mp.plate_t, "face_x": w,
@@ -771,7 +1072,7 @@ def explorer_block(kit: Kit, names: Dict[str, str], out_dir: str) -> dict:
             "nozzle_tips": tips, "plate": names["plate"], "cradle": names["cradle"],
             "slope": kp.below_slope_deg, "gap": kp.below_gap, "toolhead": [kp.toolhead_dy - kp.toolhead_margin, kp.toolhead_dz - kp.toolhead_margin],
             "window_z": kp.window_z - kp.window_margin, "direct": direct,
-            "chosen": {"angle": a0, "dy": dy0, "dz": dz0, "shift": s0, "case": kp.chosen_case}}
+            "chosen": {"angle": a0, "dy": dy0, "dz": dz0, "shift": s0, "case": kp.chosen_case}, "slide": slide}
 
 
 def write_viewer(kit: Kit, by_drop, plate, cradle, out: str) -> None:
@@ -828,6 +1129,7 @@ def write_viewer(kit: Kit, by_drop, plate, cradle, out: str) -> None:
                     "plate_h": kit.mp.plate_h, "axis_from_wall": placements[a]}
     configs["_explorer"] = explorer_block(kit, names, out)
     names.update({f"direct_{v}_{k}": fn for v, d in configs["_explorer"]["direct"].items() for k, fn in d.items()})
+    names.update({f"slide_{k}": configs["_explorer"]["slide"][k] for k in ("wedge", "hw")})
     with open(os.path.join(out, "viewer_kit.json"), "w") as f:
         json.dump({"files": sorted(set(names.values())), "configs": configs}, f, indent=1)
     log.info("Wrote viewer kit data: %d configs, %d meshes", len(configs), len(names))

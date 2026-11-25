@@ -44,7 +44,8 @@ FIG_W_IN, FIG_DPI = 12.0, 130
 ISO_ELEV, ISO_AZIM = 28.0, -60.0   # camera above, in front of the -Y face, +X end to the right
 ISO_PX_W, ISO_PX_H = 1600, 900
 PART_COLOURS = {"base": "#4f81bd", "lid": "#e0a040", "module": "#59a14f", "mount": "#b05fa0",
-                "cable": "#222222", "cradle": "#8a8a8a", "fov": "#e04b4b"}
+                "cable": "#222222", "cradle": "#8a8a8a", "fov": "#e04b4b",
+                "bolt + nut": "#c8b020"}
 
 
 @dataclass

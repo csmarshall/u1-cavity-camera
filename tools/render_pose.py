@@ -1,4 +1,4 @@
-"""Section + iso of the cradle-free pose mount (wedge, plate, thick-floor case) with the cover, toolhead and window keep-outs (world). POSE_CASE=VARIANT:0|180 picks the case (default side+Y:180)."""
+"""Section + iso of the cradle-free slide mount (wedge, plate, thick-floor case, M3 bolt + nut) with the cover, toolhead and window keep-outs (world). Sections at both slide-travel ends and the nominal shift. POSE_CASE=VARIANT:0|180 picks the case (default side+Y:180)."""
 import argparse, os, sys, logging
 R = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path[:0] = [R + "/cad", R + "/tools"]
@@ -19,18 +19,27 @@ plate = kit.build_plate()
 kit.set_drop(-dz); kit.shift = s; kit.g.axis_Y = dy
 cp = kit.direct_params(vname)
 kit.half_w = cp.out_w / 2
-wedge = kit.build_wedge(a)
-base, lid = kit.build_direct_base(vname), case.build_lid(cp)
-L = [rp.Layer("mount", wedge.val()), rp.Layer("plate", plate.val()),
-     rp.Layer("base", kit.posed(kit.to_mount_frame(base, rot), a).val()),
-     rp.Layer("lid", kit.posed(kit.to_mount_frame(lid, rot), a).val())]
-if cp.use_cap:
-    L.append(rp.Layer("cable", kit.posed(kit.to_mount_frame(case.build_cable_cap(cp), rot), a).val()))
-n_parts = len(L)
-L += [rp.Layer("cover", kit.g.to_world(kit.g.cover()).intersect(uk._box(-40, 40, -40, 40, -80, 40)).val(), 0.35),
-      rp.Layer("toolhead keep-out", kit.toolhead().intersect(uk._box(-40, 40, -40, 60, -80, 40)).val(), 0.35),
-      rp.Layer("window keep-out", kit.window().intersect(uk._box(-40, 40, 0, 60, 0, 48)).val(), 0.35)]
+lid = case.build_lid(cp)
+outer = [kit.to_mount_frame(x, rot) for x in [case.build_base(cp), lid] + ([case.build_cable_cap(cp)] if cp.use_cap else [])]
+sl = kit.setup_slide(a, vname, rot, outer)
+wedge, hw = kit.build_wedge(a), kit.slide_hardware(a)
+base = kit.build_direct_base(vname)
 out = R + "/docs/renders"
-rp.render_section(L, "x", 0.0, f"Pose {a:g} deg, dy {dy:g}, dz {dz:g}, camera shift {s:g} mm: centreline section", out + f"/pose_{a:g}_dy{dy:g}_dz{dz:g}_shift{s:g}_section.png")
-rp.render_iso(L[:n_parts], f"Pose {a:g} deg, dy {dy:g}, camera shift {s:g} mm", out + f"/pose_{a:g}_dy{dy:g}_dz{dz:g}_shift{s:g}_iso.png", elev=15, azim=-30)
+for label, shift in (("min", sl["s_min"]), ("nominal", s), ("max", sl["s_max"])):
+    kit.shift = shift
+    L = [rp.Layer("mount", wedge.val()), rp.Layer("plate", plate.val()), rp.Layer("bolt + nut", hw.val()),
+         rp.Layer("base", kit.posed(kit.to_mount_frame(base, rot), a).val()),
+         rp.Layer("lid", kit.posed(kit.to_mount_frame(lid, rot), a).val())]
+    if cp.use_cap:
+        L.append(rp.Layer("cable", kit.posed(kit.to_mount_frame(case.build_cable_cap(cp), rot), a).val()))
+    n_parts = len(L)
+    L += [rp.Layer("cover", kit.g.to_world(kit.g.cover()).intersect(uk._box(-40, 40, -40, 40, -80, 40)).val(), 0.35),
+          rp.Layer("toolhead keep-out", kit.toolhead().intersect(uk._box(-40, 40, -40, 60, -80, 40)).val(), 0.35),
+          rp.Layer("window keep-out", kit.window().intersect(uk._box(-40, 40, 0, 60, 0, 48)).val(), 0.35)]
+    rp.render_section(L, "x", 0.0, f"Slide at shift {shift:.1f} mm ({label}; travel {sl['s_min']:.1f}..{sl['s_max']:.1f}), "
+                      f"{a:g} deg, dy {dy:g}: centreline section",
+                      out + f"/pose_{a:g}_dy{dy:g}_dz{dz:g}_slide_{label}_section.png")
+    if label == "nominal":
+        rp.render_iso(L[:n_parts], f"Pose {a:g} deg, dy {dy:g}, camera shift {s:g} mm (slide mount)",
+                      out + f"/pose_{a:g}_dy{dy:g}_dz{dz:g}_shift{s:g}_iso.png", elev=15, azim=-30)
 print("wrote", out)
