@@ -82,6 +82,8 @@ class KitParams:
     pad_w: float = 14.0              # wedge face around the key
     pilot_d: float = 2.5             # M3 self-tap pilot in the key
     pilot_depth: float = 8.0
+    key_screw_l: float = 10.0        # final mount: countersunk M3 through the case floor into the key (Charles has x6, x10)
+    key_screw_min_thread: float = 4.5   # 1.5 x d of thread in the key + wedge
     screw_clear_d: float = 3.4
     screw_csk_d: float = 6.5         # M3 countersunk head, flush with the cradle floor top
     # Universal cradle
@@ -794,6 +796,17 @@ def build_direct_pose(kit: Kit, plate: cq.Workplane, angle: float, dy: float, dz
         held.append(("cable cap", kit.to_mount_frame(cap, rot)))
     check_pose(kit, angle, wedge, plate, held,
                envelopes=[("case envelope", kit.to_mount_frame(case.build_size_mockup(p), rot))])
+    # Key screw: head flush in the floor, so its tip is key_screw_l below the floor top. It must
+    # thread far enough into the key + wedge, and not bottom out in the pilot
+    tip = p.floor - kp.key_screw_l
+    thread = kp.key_h - tip
+    spare = tip - (kp.key_h - kp.pilot_depth)
+    if thread < kp.key_screw_min_thread:
+        raise RuntimeError(f"M3 x {kp.key_screw_l:g} threads only {thread:.1f} mm into the key (want "
+                           f"{kp.key_screw_min_thread:g}): use a longer screw")
+    if spare < 0.5:
+        raise RuntimeError(f"M3 x {kp.key_screw_l:g} bottoms out in the {kp.pilot_depth:g} mm pilot: use a shorter screw")
+    log.debug("Key screws M3 x %g: %.1f mm of thread, %.1f mm short of the pilot bottom", kp.key_screw_l, thread, spare)
     # check_pose's wedge-vs-base test is also the key-seat test: the keys stand key_h proud of the
     # pad, so anywhere but inside a pocket they would cut into the floor
     # Printability: the base prints floor down as always; its pocket ceilings are 10 mm bridges
