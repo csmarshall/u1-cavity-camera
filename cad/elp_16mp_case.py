@@ -9,11 +9,12 @@ and PCB thickness are ASSUMPTIONS exposed as parameters below. Measure the
 board and adjust.
 
 Lid closure options (closure):
-  "snap"  - (default) one cantilever hook hangs from each end of the lid into a
-            pocket in the base end block. A barb on the hook clicks into a
-            window in the outer end face. To open, push each barb in through its
-            window with a pick or small screwdriver and lift the lid. No hardware.
-  "screw" - two M2 screws through the lid into pilot holes in the end blocks.
+  "screw" - (default) two M2 countersunk screws through the lid into pilot holes
+            in the end blocks. Default since Charles prints in PC-GF, which
+            allows only ~1% flex strain (see max_strain).
+  "snap"  - one cantilever hook hangs from each end of the lid into a pocket in
+            the base end block. A barb on the hook clicks into a window in the
+            outer end face. Needs ~1.9% strain: PETG/ASA only (set max_strain).
 
 Cable exit options (cable_exit):
   "end"  - (default) U-slot through the +X short end, with a cable bay so the
@@ -82,7 +83,7 @@ class Params:
     ear_l: float = 7.5           # solid block at each end (holds the snap pocket or screw)
 
     # --- Closure ---
-    closure: str = "snap"        # "snap" or "screw"
+    closure: str = "screw"       # "screw" (default since PC-GF: nothing flexes) or "snap" (hooks need ~2% strain)
     # snap-hook options
     hook_t: float = 0.9          # arm thickness (flex direction, X)
     hook_w: float = 4.0          # arm width (Y)
@@ -93,7 +94,9 @@ class Params:
     hook_clear: float = 0.2      # clearance around the arm in its pocket
     end_wall: float = 1.5        # plastic between pocket and the outer end face (the window wall)
     hook_y_cable_end: float = 3.3  # hook Y on the cable end (off-centre to clear the slot and nozzle)
-    max_strain: float = 0.02     # allowed flex strain (PETG/ASA ~2%)
+    # Allowed repeated-flex strain for the print material. Charles prints in PC-GF (2026-11-24): printed
+    # 30% GF-PC breaks at ~2.5% (Owens Corning XSTRAND GF30-PC TDS), so flexures get ~1%. PETG/ASA was 2%.
+    max_strain: float = 0.01
     # screw options (M2 self-tapping or M2 machine screw into plastic)
     screw_pilot_d: float = 1.7   # pilot in base (use 3.2 for M2 heat-set inserts)
     screw_clear_d: float = 2.4   # clearance in lid
@@ -775,7 +778,7 @@ def self_check(p: Params, base: cq.Workplane, lid: cq.Workplane) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default="out", help="output directory")
-    ap.add_argument("--closure", choices=["snap", "screw"], default="snap")
+    ap.add_argument("--closure", choices=["snap", "screw"], default=Params.closure)
     ap.add_argument("--cable-exit", choices=["end", "side_end", "side"], default="end")
     ap.add_argument("--cable-side", type=int, choices=[1, -1], default=1, help="side_end/side: +1 = +Y wall, -1 = -Y wall")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"),
@@ -835,7 +838,7 @@ def main() -> None:
         exports["elp_16mp_coupon_base.stl"] = c_base
         exports["elp_16mp_coupon_lid.stl"] = flip_lid(c_lid)
     # Non-default variants get a suffix so they never overwrite the default files
-    sfx = ("" if p.closure == "snap" else f"_{p.closure}") + \
+    sfx = ("" if p.closure == Params.closure else f"_{p.closure}") + \
           ("" if p.cable_exit == "end" else f"_{p.cable_exit}{'+Y' if p.cable_side > 0 else '-Y'}")
     if sfx:
         exports = {n.replace(".stl", f"{sfx}.stl").replace(".step", f"{sfx}.step"): v for n, v in exports.items()}

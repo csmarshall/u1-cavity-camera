@@ -21,7 +21,7 @@ The predecessor was the ELP-USB8MP05AF-V62 (8 MP IMX179, 62.3 × 9 × 6 mm), dro
 
 - Snapmaker U1 with the Top Cover (enclosure). Charles slices with Snapmaker Orca on macOS.
 - Runs **paxx12 Extended Firmware**: full Klipper, Mainsail/Fluidd, WebRTC. The second USB camera is enabled with `usb: paxx12` under `[camera]`, and image settings are in a V4L2 controls panel. It does **not** use Crowsnest. Known issue: the V4L2 panel polling made a Logitech C270 reset every ~13 s. If the ELP feed drops, check that first.
-- Print in PETG or ASA. The enclosure top runs warm, so PLA hooks and hinges creep.
+- Charles prints in **PC-GF** (2026-11-24). Printed PC-GF breaks at ~2.5% strain, so flexures get ~1% (`case.Params.max_strain`, the one home for the material limit). That's why the lid is screwed shut by default. The enclosure top runs warm, so PLA creeps.
 
 ## Current design state (commit a49edda + this handoff)
 
@@ -62,7 +62,7 @@ The predecessor was the ELP-USB8MP05AF-V62 (8 MP IMX179, 62.3 × 9 × 6 mm), dro
    - Keep it out of the toolhead and gantry travel, and mount inside the cover, not shooting through the panel (glare).
 2. **Margins to revisit:**
    - The nozzle-to-snap-release-window gap is only **0.10 mm**. Consider moving the hook or nozzle, or shrinking the window.
-   - Hook strain is at 1.93% against a 2% limit. That's fine for PETG; check it if the material changes.
+   - Snap hook strain is 1.93%, which fails the PC-GF 1% limit, so `closure="screw"` is now the default.
 3. **Add a camera-view preview to the viewer**: a frustum or projected footprint on a 270 mm bed at the chosen tilt and height.
 4. **Test coupons**: the snap coupon is done (`stl/elp_16mp_coupon_*.stl`, `coupon_l`). It matters because the hooks flex across layer lines and the 0.7 mm barb catch face prints as an unsupported overhang. A nozzle stub is still to do.
 5. After measuring the real board, update the parameters and rerun.

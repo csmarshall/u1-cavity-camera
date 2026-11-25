@@ -240,11 +240,26 @@ def views(p: case.Params) -> Dict[str, Callable[[str], None]]:
     # "below" world = mount frame turned 180 deg about Y, which mirrors X
     knuckle_xb = -sum(gb.knuckle_spans()["cradle"][1]) / 2
     wedge_print = mount.print_orient_plate(mount.build_wedge_mount(g, 45.0)).val()
+    snap = p.closure == "snap"
+    closure_views = {
+        # Cable-end hook: pocket, release window, barb engagement
+        "section_hook": lambda out: render_section(
+            asm, "y", hook_cable_end["y"], "Snap hooks: pocket, window, barb", out),
+        # Snap coupon in print orientation: base upright, lid outer face down, side by side
+        "coupon_print_iso": lambda out: render_iso(
+            [Layer("base", coupon_base_print), Layer("lid", coupon_lid_print)],
+            "Snap test coupon, as printed (both on the bed, no supports)", out),
+    } if snap else {
+        # Through one lid screw: countersink in the lid, pilot in the end block
+        "section_screw": lambda out: render_section(
+            asm, "y", p.screw_pts[0][1], "Lid screw: M2 countersink in the lid, 1.7 mm pilot in the end block", out),
+    }
     return {
         # Hinge and landscape mount views were retired (dead end); the portrait-below
         # test kit is shown live in the viewer. Old renders: docs/renders/archive/.
         "base_iso": lambda out: render_iso([Layer("base", base)], "Base, as printed (upright)", out),
-        "lid_iso": lambda out: render_iso([Layer("lid", lid)], "Lid, assembled orientation (hooks down)",
+        "lid_iso": lambda out: render_iso([Layer("lid", lid)],
+                                          f"Lid, assembled orientation ({'hooks' if snap else 'ribs'} down)",
                                           out, elev=-25),
         "assembly_iso": lambda out: render_iso([Layer("base", base), Layer("lid", lid, 0.55)],
                                                "Assembly", out),
@@ -256,13 +271,7 @@ def views(p: case.Params) -> Dict[str, Callable[[str], None]]:
         "cable_end_iso": lambda out: render_iso(
             [Layer("base", base), Layer("lid", lid, 0.5)] + ([Layer("mount", cap)] if cap is not None else []),
             "Cable end: lid tongue in the end-wall slot, cap on the nozzle", out, elev=30, azim=-35),
-        # Cable-end hook: pocket, release window, barb engagement
-        "section_hook": lambda out: render_section(
-            asm, "y", hook_cable_end["y"], "Snap hooks: pocket, window, barb", out),
-        # Snap coupon in print orientation: base upright, lid outer face down, side by side
-        "coupon_print_iso": lambda out: render_iso(
-            [Layer("base", coupon_base_print), Layer("lid", coupon_lid_print)],
-            "Snap test coupon, as printed (both on the bed, no supports)", out),
+        **closure_views,
         "size_mockup_iso": lambda out: render_iso(
             [Layer("mount", case.build_size_mockup(p).val())],
             "Size mockup, as printed (lens face up): outside shape of the assembled case", out),

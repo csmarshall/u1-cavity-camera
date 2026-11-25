@@ -9,10 +9,9 @@ The camera is a 62.3 × 9 × 5.5 mm strip board with a Sony IMX298 sensor and a 
 | Path | What |
 |---|---|
 | `cad/elp_16mp_case.py` | Parametric CadQuery model. All dimensions are in the `Params` dataclass. |
-| `stl/elp_16mp_base.stl` | Base: snap-fit version with heat-shrink cable nozzle. |
+| `stl/elp_16mp_base.stl` | Base: screw-closed (2× M2 countersunk into the end blocks), with heat-shrink cable nozzle. |
 | `stl/elp_16mp_lid.stl` | Lid, already flipped for printing. |
-| `stl/elp_16mp_*_screw.stl` | Same case closed with 2× M2 countersunk screws instead of snap hooks. |
-| `stl/elp_16mp_coupon_{base,lid}.stl` | Snap test coupon: the -X end of the case (12 mm slice) to test the hook click and release before a full print. |
+| `stl/elp_16mp_coupon_{base,lid}.stl` | Snap test coupon (snap closure only, for PETG/ASA): the -X end of the case (12 mm slice) to test the hook click and release before a full print. |
 | `stl/elp_16mp_cable_cap.stl` | Top half of the cable nozzle. Print it split face down. Lay the cable in the base half, put the cap on, close the lid (its tongue closes the end-wall slot), then shrink the tubing over the whole nozzle. |
 | `stl/elp_16mp_size_mockup.stl` | Solid block with the assembled case's outside shape, nozzle and lens window included, plus a crosshair on the lens axis. Print it to find a mount spot inside the printer. |
 | `cad/u1_front_mount.py` | (Retired: the hinge was a dead end; kept for its shared geometry.) Tilt mount for the U1's front vertical feature: VHB/M3 wall plate, snap-in cradle, M3 friction hinge, and a fixed-angle wedge. `--side above/below`, `--orientation landscape/portrait`, `--wedge-angle N`. |
@@ -25,7 +24,7 @@ The camera is a 62.3 × 9 × 5.5 mm strip board with a Sony IMX298 sensor and a 
 | `stl/pose_*.stl` | **Final mount** (`u1_wedge_kit.py --pose ANGLE DY DZ SHIFT`, no cradle or clip). Rebuild it with the reading from the slide test as SHIFT (currently 45, 17.5, 0, 35.3, cable out the X+ Y+ corner). The wedge keys into the case back and is held by countersunk M3s driven from inside the case on the bench, before the board goes in, so nothing has to be reached on the printer. |
 | `cad/u1_wedge_kit.py` | **Portrait-below test kit** (current direction). One wall plate with a dovetail rail, wedges at 30/45/60/75 degrees, and one universal cradle. Each wedge slides on the rail and carries the cradle on a square key with one countersunk M3 x 10 screw. The cradle fits the end, side +Y and side -Y cases either way up, giving 6 cable exits per angle. Built from Charles's measurements (each rounded down): lip 25 mm, a 15 mm gap under it, the shell at 45 degrees from vertical, and the toolhead at front-most travel 45 mm below and 10 mm in from the lip, as a keep-out zone. The ribs are 57 mm apart at the front centre, so the plate is 55 mm wide. |
 | `stl/kit_wall_plate.stl`, `stl/kit_cradle_universal.stl`, `stl/kit_wedge_*deg_slope35.stl` | Kit parts in print orientation. The plate prints back down, the cradle floor down, and the wedges on their side (angle label up). Ready to print. Wedges are `kit_wedge_{30,45,60,75}deg_gap15_slope45.stl`; for other angles, rebuild with `--angles`. |
-| `step/elp_16mp_case.step` | Assembled base + lid (snap version) for CAD. |
+| `step/elp_16mp_case.step` | Assembled base + lid (screw version) for CAD. |
 | `step/elp_16mp_iteration.step` | For positioning the camera in your own CAD. Named bodies: `case_base`, `case_lid`, `ref_camera_mock`, `ref_size_mockup_offset_-40y`, and two 450 mm field-of-view pyramids (`ref_fov_stream_16x9` at 97 × 65°, `ref_fov_sensor_4x3` at 97 × 81°). Units are mm. The origin is the board centre, Z = 0 is the outside of the base floor, the lens faces +Z, X is the board length, and the cable nozzle is at +X. The sensor's long axis is assumed to run along X. |
 | `viewer/index.html` | Self-contained three.js viewer with explode, section cut and FOV cone. Open it in a browser. |
 
@@ -33,7 +32,7 @@ The camera is a 62.3 × 9 × 5.5 mm strip board with a Sony IMX298 sensor and a 
 
 - **Fit**: board drops in lens-up onto two side rails, 0.3 mm clearance per side. Ribs on the lid press the board edges down.
 - **Lens window**: a cone in the lid sized from the lens's ~109° diagonal FOV so the lid never vignettes the image.
-- **Closure**: one cantilever snap hook at each end of the lid (0.5 mm catch, ~1.9% strain). To open, push each barb in through its window in the end face and lift. Set `closure="screw"` for the screw version (M2 × 6 or × 8 countersunk flat head into 1.7 mm pilots).
+- **Closure**: 2× M2 × 6 or × 8 countersunk flat heads through the lid into 1.7 mm pilots in the end blocks. Set `closure="snap"` (and `max_strain=0.02`) for the snap-hook version: a cantilever hook at each end of the lid (0.5 mm catch, ~1.9% strain), which only suits PETG/ASA.
 - **Cable**: exits the short end through a cable bay (so the 4-pin plug can turn) and a ridged nozzle that is enclosed all round. The base holds the lower half, a separate cap is the upper half, and a tongue on the lid closes the end-wall slot above the cable. Shrink tubing over the nozzle clamps the halves together. The barbs' sheer faces point at the case so the tubing can't slide off. Set `cable_exit="side"` for a long-side slot instead.
 - **Self-check**: the script fails if parts collide with each other or with a stand-in for the camera, if a part isn't a single valid solid, or if walls or webs get thinner than 0.8 mm.
 
@@ -51,7 +50,7 @@ ELP publishes no mechanical drawing. These are guesses, and each is a parameter:
 
 ## Printing
 
-- PETG or ASA. The top of the U1 enclosure gets warm, and PLA snap hooks creep.
+- PC-GF (Charles's choice). Printed PC-GF breaks at about 2.5% strain, so everything that flexes is held to 1% (`max_strain` in `cad/elp_16mp_case.py`): the lid is screwed shut, and the slide test's detent finger runs at 0.6%. Glass fibre is abrasive, so use a hardened nozzle. PLA is out: the top of the enclosure runs warm and PLA creeps.
 - Base upright, lid outer face down. No supports needed for either part.
 - Heat shrink: about 9 mm, 3:1, adhesive-lined, about 20 mm long. Slide it on from the 4-pin plug end before connecting the cable.
 

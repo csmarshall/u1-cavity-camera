@@ -95,7 +95,7 @@ class KitParams:
     # (the explorer's shift) and clicks into a detent every 1 mm, tool-free, so Charles can find the
     # right elevation by hand while watching the stream, read the scale, then print the keyed final
     # (--pose ANGLE DY DZ <reading>). Travel: case top level with the plate top -> window keep-out.
-    slide_tongue_l: float = 16.0     # tongue length along the case axis
+    slide_tongue_l: float = 22.0     # tongue length along the case axis (holds the 10 mm detent finger)
     slide_pad_l: float = 24.0        # wedge contact pad length along the case axis
     slide_groove_w: float = 5.0      # dovetail width at the case back (widens inward at 45 deg); 5.6 came
                                      # within 0.7 mm of the side cable bore at the closed end
@@ -108,12 +108,11 @@ class KitParams:
     # side), so it bends along the layers, not across them.
     detent_pitch: float = 1.0        # one click per scale tick (Charles: 1 mm)
     detent_notch_d: float = 0.45     # V-notch depth; 45 deg flanks need 2x depth <= pitch
-    finger_l: float = 7.0            # root to bump
+    finger_l: float = 10.0           # root to bump: strain goes as 1/L^2 (PC-GF allows ~1%, see case max_strain)
     finger_w: float = 3.0
     finger_t: float = 1.0
     finger_slot: float = 0.4         # cut each side of the finger
     finger_relief: float = 0.4       # room under the finger beyond its full deflection
-    finger_max_strain: float = 0.02  # PETG, same limit as the case's snap hooks
     # Scale (Charles: bolder, readable inside the printer). It lives on the case's floor band
     # (floor_t tall), so tick + number heights are budgeted against that band in check_slide.
     scale_depth: float = 0.8         # engraving depth: deep enough to throw a shadow or take paint
@@ -946,8 +945,10 @@ def check_slide(kit: Kit, p: case.Params) -> None:
         raise RuntimeError(f"only {roof:.2f} mm of floor over the detent notches")
     if 2 * kp.detent_notch_d > kp.detent_pitch:
         raise RuntimeError("detent notches overlap: 45-degree flanks need 2 x depth <= pitch")
-    if lay["strain"] > kp.finger_max_strain:
-        raise RuntimeError(f"detent finger strain {100 * lay['strain']:.2f}% > {100 * kp.finger_max_strain:.0f}%")
+    if lay["strain"] > p.max_strain:     # the print material's flex limit lives once, in case.Params
+        raise RuntimeError(f"detent finger strain {100 * lay['strain']:.2f}% > {100 * p.max_strain:.1f}%")
+    if kp.slide_pad_l < kp.slide_tongue_l:
+        raise RuntimeError("the wedge pad is shorter than its tongue")
     if kp.finger_w / 2 + kp.finger_slot > kp.slide_groove_w / 2 - kp.slide_clear:
         raise RuntimeError("finger + slots are wider than the tongue at the case back")
     # Scale legibility budget: ticks and numbers inside the floor band, lands between ticks,
