@@ -1,4 +1,4 @@
-"""Section + iso of the cradle-free slide mount (wedge, plate, thick-floor case, M3 bolt + nut) with the cover, toolhead and window keep-outs (world). Sections at both slide-travel ends and the nominal shift. POSE_CASE=VARIANT:0|180 picks the case (default side+Y:180)."""
+"""Section + iso of the slide TEST mount (wedge with detent tongue, plate, thick-floor case) with the cover, toolhead and window keep-outs (world). Sections at both slide-travel ends and the nominal shift. POSE_CASE=VARIANT:0|180 picks the case (default side+Y:180)."""
 import argparse, os, sys, logging
 R = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path[:0] = [R + "/cad", R + "/tools"]
@@ -22,12 +22,13 @@ kit.half_w = cp.out_w / 2
 lid = case.build_lid(cp)
 outer = [kit.to_mount_frame(x, rot) for x in [case.build_base(cp), lid] + ([case.build_cable_cap(cp)] if cp.use_cap else [])]
 sl = kit.setup_slide(a, vname, rot, outer)
-wedge, hw = kit.build_wedge(a), kit.slide_hardware(a)
+wedge = kit.build_wedge(a)
 base = kit.build_direct_base(vname)
 out = R + "/docs/renders"
-for label, shift in (("min", sl["s_min"]), ("nominal", s), ("max", sl["s_max"])):
+import math
+for label, shift in (("min", math.ceil(sl["s_min"])), ("nominal", s), ("max", math.floor(sl["s_max"]))):
     kit.shift = shift
-    L = [rp.Layer("mount", wedge.val()), rp.Layer("plate", plate.val()), rp.Layer("bolt + nut", hw.val()),
+    L = [rp.Layer("mount", wedge.val()), rp.Layer("plate", plate.val()),
          rp.Layer("base", kit.posed(kit.to_mount_frame(base, rot), a).val()),
          rp.Layer("lid", kit.posed(kit.to_mount_frame(lid, rot), a).val())]
     if cp.use_cap:
@@ -40,6 +41,6 @@ for label, shift in (("min", sl["s_min"]), ("nominal", s), ("max", sl["s_max"]))
                       f"{a:g} deg, dy {dy:g}: centreline section",
                       out + f"/pose_{a:g}_dy{dy:g}_dz{dz:g}_slide_{label}_section.png")
     if label == "nominal":
-        rp.render_iso(L[:n_parts], f"Pose {a:g} deg, dy {dy:g}, camera shift {s:g} mm (slide mount)",
+        rp.render_iso(L[:n_parts], f"Pose {a:g} deg, dy {dy:g}, camera shift {s:g} mm (slide test)",
                       out + f"/pose_{a:g}_dy{dy:g}_dz{dz:g}_shift{s:g}_iso.png", elev=15, azim=-30)
 print("wrote", out)
