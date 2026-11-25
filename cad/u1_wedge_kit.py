@@ -106,7 +106,7 @@ class KitParams:
     nut_af: float = 5.5              # M3 hex nut across flats
     nut_t: float = 2.4               # M3 hex nut thickness
     nut_clear: float = 0.2           # per side: channel flats stop the nut turning (corners 6.35 > channel)
-    bolt_l: float = 10.0             # M3 button-head length (Charles has 6 mm and up)
+    bolt_l: float = 10.0             # M3 button-head length; Charles has 6/8/10/12 (6 is too short: check_slide)
     bolt_clear_d: float = 3.4
     bolt_head_d: float = 5.7         # ISO 7380 M3 button head
     cbore_clear: float = 0.6         # counterbore diameter over the head
